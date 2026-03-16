@@ -1,12 +1,13 @@
-"""内容读取模块 (content_reader)
+"""Content reader module (content_reader)
 
-负责从 JSONL 会话文件中增量读取并解析对话内容，将原始 JSON 记录转化为
-Session 对象上的结构化状态字段（当前动作、涉及文件、是否报错/完成、
-等待时长、最近消息、任务摘要等）。
+Incrementally reads and parses conversation content from JSONL session files,
+converting raw JSON records into structured state fields on Session objects
+(current action, involved files, error/completion status, wait duration,
+recent messages, task summary, etc.).
 
-支持 Claude Code 和 Codex 两种 JSONL 格式的解析。采用增量读取策略
-（记录已读行数），避免每轮重复解析全部内容。同时提供 AppleScript / tmux
-兜底方案，在 JSONL 不可用时从终端直接获取输出。
+Supports parsing both Claude Code and Codex JSONL formats. Uses incremental
+reading (tracking lines read) to avoid re-parsing all content each cycle.
+Also provides AppleScript / tmux fallback for when JSONL is unavailable.
 """
 
 import json
@@ -17,20 +18,20 @@ from datetime import datetime
 
 
 class ContentReader:
-    """读取对话流内容，提取结构化状态信息。"""
+    """Reads session content and extracts structured state information."""
 
     def __init__(self):
-        # file_path -> 已读行数
+        # file_path -> lines read so far
         self._read_positions = {}
-        # file_path -> 累积状态缓存
+        # file_path -> accumulated state cache
         self._state_cache = {}
 
     def update(self, session):
-        """读取 session 的 JSONL 新增行，更新 session 状态字段。"""
+        """Read new JSONL lines for a session and update its state fields."""
         fpath = session.file_path
         pos = self._read_positions.get(fpath, 0)
 
-        # 先从缓存恢复累积状态（因为 discover() 每轮创建新 Session 对象）
+        # Restore accumulated state from cache (discover() creates new Session objects each cycle)
         cached = self._state_cache.get(fpath)
         if cached:
             session.current_action = cached["current_action"]
@@ -42,6 +43,7 @@ class ContentReader:
             session.recent_messages = list(cached["recent_messages"])
             session.task_summary = cached.get("task_summary", "")
             session.ai_task_description = cached.get("ai_task_description", "")
+            session._last_assistant_had_tool_use = cached.get("last_assistant_had_tool_use", False)
 
         try:
             with open(fpath, "r", encoding="utf-8") as f:
@@ -49,8 +51,8 @@ class ContentReader:
         except OSError:
             return
 
-        # 只消费以 \n 结尾的完整行，避免读到写入中的半行 JSON
-        # 导致解析失败且 pos 推进过去，永远丢失该事件
+        # Only consume complete lines (ending with \n) to avoid reading
+        # partially-written JSON that would cause parse failure and advance pos
         complete = len(lines)
         if lines and not lines[-1].endswith("\n"):
             complete -= 1
@@ -64,10 +66,10 @@ class ContentReader:
             elif session.cli_type == "codex":
                 self._parse_codex_lines(session, new_lines)
 
-        # 防御性回扫：如果仍未标记完成且无新行，检查最后几行
-        # 覆盖两种情况：
-        # 1. 之前丢失的 turn_duration / task_complete 事件
-        # 2. 快速纯文本回复（如 "hi"）可能根本没有 turn_duration
+        # Defensive back-scan: if still not marked completed and no new lines, check last few lines.
+        # Covers two cases:
+        # 1. Previously missed turn_duration / task_complete events
+        # 2. Quick text-only replies (e.g. "hi") that may have no turn_duration at all
         if not session.is_completed and not new_lines and complete > 0:
             try:
                 idle_seconds = time.time() - os.path.getmtime(fpath)
@@ -75,6 +77,24 @@ class ContentReader:
                 idle_seconds = 0
 
             tail_start = max(0, complete - 5)
+            # First, find the most recent assistant message to check for tool_use
+            recent_assistant_had_tool = False
+            for line in reversed(lines[tail_start:complete]):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                    if rec.get("type") == "assistant":
+                        content = rec.get("message", {}).get("content", [])
+                        recent_assistant_had_tool = isinstance(content, list) and any(
+                            isinstance(it, dict) and it.get("type") == "tool_use"
+                            for it in content
+                        )
+                        break
+                except json.JSONDecodeError:
+                    continue
+
             for line in reversed(lines[tail_start:complete]):
                 line = line.strip()
                 if not line:
@@ -83,16 +103,19 @@ class ContentReader:
                     rec = json.loads(line)
                     rtype = rec.get("type", "")
                     if rtype == "system" and rec.get("subtype") == "turn_duration":
-                        session.is_completed = True
-                        session.current_action = ""
+                        # Only mark completed if the preceding assistant had no tool_use;
+                        # otherwise this is an intermediate turn (e.g. during smooshing)
+                        if not recent_assistant_had_tool:
+                            session.is_completed = True
+                            session.current_action = ""
                         break
                     if rtype == "event_msg" and rec.get("payload", {}).get("type") == "task_complete":
                         session.is_completed = True
                         session.current_action = ""
                         break
                     if rtype == "assistant" and idle_seconds > 5:
-                        # 最后事件是 assistant 且文件已静默 5s+
-                        # 检查是否纯文本（无 tool_use）→ 推断已完成
+                        # Last event is assistant and file has been quiet 5s+
+                        # Check if pure text (no tool_use) -> infer completed
                         content = rec.get("message", {}).get("content", [])
                         has_tool = isinstance(content, list) and any(
                             isinstance(it, dict) and it.get("type") == "tool_use"
@@ -103,16 +126,16 @@ class ContentReader:
                             session.current_action = ""
                         break
                     if rtype in ("user", "assistant", "event_msg"):
-                        break  # 还在进行中
+                        break  # still in progress
                 except json.JSONDecodeError:
                     continue
 
-        # 计算等待时长
+        # Calculate wait duration
         if session.last_user_time:
             session.wait_seconds = time.time() - session.last_user_time
 
-        # 保存累积状态到缓存（ai_task_description 由 advisor 异步回填，
-        # 需通过 sync_ai_description() 在 advisor 运行后同步回缓存）
+        # Save accumulated state to cache (ai_task_description is backfilled by advisor async,
+        # needs sync_ai_description() call after advisor runs to update cache)
         self._state_cache[fpath] = {
             "current_action": session.current_action,
             "files_involved": list(session.files_involved),
@@ -123,20 +146,22 @@ class ContentReader:
             "recent_messages": list(session.recent_messages),
             "task_summary": session.task_summary,
             "ai_task_description": session.ai_task_description,
+            "last_assistant_had_tool_use": getattr(session, "_last_assistant_had_tool_use", False),
         }
 
     def sync_ai_description(self, session):
-        """将 advisor 回填的 ai_task_description 同步到缓存。
+        """Sync advisor-backfilled ai_task_description to cache.
 
-        advisor 在 reader.update() 之后运行，直接修改 session 对象。
-        需要在 advisor 运行后调用此方法，否则下轮缓存恢复会覆盖新值。
+        The advisor runs after reader.update() and directly modifies the session object.
+        This must be called after advisor runs, otherwise next cycle's cache restore
+        will overwrite the new value.
         """
         cached = self._state_cache.get(session.file_path)
         if cached and session.ai_task_description:
             cached["ai_task_description"] = session.ai_task_description
 
     def read_terminal_content(self):
-        """兜底：通过 AppleScript / tmux 获取终端内容。"""
+        """Fallback: get terminal content via AppleScript / tmux."""
         content = self._try_applescript_terminal()
         if content:
             return content
@@ -149,7 +174,8 @@ class ContentReader:
         return ""
 
     def _parse_claude_lines(self, session, lines):
-        """解析 Claude Code JSONL 行。"""
+        """Parse Claude Code JSONL lines."""
+        last_had_tool = getattr(session, "_last_assistant_had_tool_use", False)
         for line in lines:
             line = line.strip()
             if not line:
@@ -162,7 +188,7 @@ class ContentReader:
             rec_type = rec.get("type", "")
 
             if rec_type == "user":
-                # 区分真正的用户消息 vs 工具执行结果
+                # Distinguish real user messages vs tool execution results
                 msg_content = rec.get("message", {}).get("content", "")
                 is_tool_result = False
                 if isinstance(msg_content, list):
@@ -172,15 +198,15 @@ class ContentReader:
                     )
 
                 if not is_tool_result:
-                    # 真正的用户消息，更新时间戳
+                    # Real user message, update timestamp
                     ts = rec.get("timestamp", "")
                     session.last_user_time = self._parse_timestamp(ts)
-                    # 记录上一轮是否已完成，用于判断是否开启新任务周期
+                    # Track whether previous turn was completed, to detect new task cycle
                     was_completed = session.is_completed
                     session.is_completed = False
                     session.has_error = False
                     session.error_message = ""
-                    # 提取用户消息文本
+                    # Extract user message text
                     user_text = ""
                     if isinstance(msg_content, str) and msg_content.strip():
                         user_text = msg_content.strip()
@@ -194,14 +220,14 @@ class ContentReader:
                                 break
                     if user_text:
                         self._add_message(session, "user", user_text[:200])
-                        # 只在新任务周期开始时更新 task_summary
-                        # （上一轮已完成 或 还没有 task_summary）
-                        # 后续追问/讨论不覆盖最初的任务描述
+                        # Only update task_summary at the start of a new task cycle
+                        # (previous turn completed or no task_summary yet)
+                        # Follow-up questions don't overwrite the initial task description
                         if was_completed or not session.task_summary:
                             session.task_summary = self._make_task_summary(user_text)
-                            session.ai_task_description = ""  # 新任务，清除旧 AI 描述
+                            session.ai_task_description = ""  # new task, clear old AI description
                 else:
-                    # 工具执行结果，检查错误/恢复
+                    # Tool execution result, check for errors/recovery
                     if isinstance(msg_content, list):
                         has_err = False
                         for item in msg_content:
@@ -213,7 +239,7 @@ class ContentReader:
                         if has_err:
                             session.has_error = True
                         elif session.has_error:
-                            # 工具成功执行，清除之前的错误状态
+                            # Tool executed successfully, clear previous error state
                             session.has_error = False
                             session.error_message = ""
 
@@ -221,7 +247,7 @@ class ContentReader:
                 content = rec.get("message", {}).get("content", [])
                 has_tool_use = False
                 if isinstance(content, list):
-                    # 提取 AI 文本回复
+                    # Extract AI text reply
                     for item in content:
                         if isinstance(item, dict) and item.get("type") == "text":
                             text = item.get("text", "").strip()
@@ -238,7 +264,7 @@ class ContentReader:
                             fpath_val = inp.get("file_path", "")
                             cmd = inp.get("command", "")
                             if cmd:
-                                # 只取第一行，避免多行命令撑爆 TUI
+                                # Take only first line to avoid multi-line commands blowing up TUI
                                 cmd_short = cmd.split("\n")[0].strip()[:50]
                                 session.current_action = f"{name}: {cmd_short}"
                             elif fpath_val:
@@ -247,21 +273,29 @@ class ContentReader:
                                 session.current_action = name
                             if fpath_val and fpath_val not in session.files_involved:
                                 session.files_involved.append(fpath_val)
-                                # 保留最近 10 个文件
+                                # Keep only the most recent 10 files
                                 if len(session.files_involved) > 10:
                                     session.files_involved = session.files_involved[-10:]
+                    last_had_tool = has_tool_use
                     if has_tool_use:
-                        # 有工具调用，说明还在工作
+                        # Has tool calls, still working
                         session.is_completed = False
-                    # 纯文本不标记完成——依赖 turn_duration 系统事件判断真正结束
+                    # Pure text doesn't mark completion -- rely on turn_duration system event
 
             elif rec_type == "system":
                 if rec.get("subtype") == "turn_duration":
-                    session.is_completed = True
-                    session.current_action = ""  # 完成后清除，避免残留
+                    if not last_had_tool:
+                        # Final turn (pure text reply) -- mark completed
+                        session.is_completed = True
+                        session.current_action = ""
+                    # If last assistant had tool_use, this is an intermediate turn
+                    # in the agent loop (e.g. between tool call and tool result,
+                    # or during smooshing) -- do NOT mark completed
+
+        session._last_assistant_had_tool_use = last_had_tool
 
     def _parse_codex_lines(self, session, lines):
-        """解析 Codex JSONL 行。"""
+        """Parse Codex JSONL lines."""
         for line in lines:
             line = line.strip()
             if not line:
@@ -308,7 +342,7 @@ class ContentReader:
                     name = payload.get("name", "")
                     args_str = payload.get("arguments", "")
                     session.current_action = name
-                    # 尝试提取文件路径
+                    # Try to extract file path
                     try:
                         args = json.loads(args_str)
                         cmd = args.get("cmd", "")
@@ -326,36 +360,35 @@ class ContentReader:
                             session.error_message = output[:100]
 
     def _make_task_summary(self, text):
-        """保留用户最近一条消息原文（截断），仅供 advisor 构建 prompt 使用。
+        """Keep user's latest message text (truncated), for advisor prompt construction only.
 
-        不做语义提炼——视角转换交给 AI CLI，规则引擎做不好这件事。
-        面板显示依赖 ai_task_description，此字段仅作上下文传递。
+        No semantic extraction -- perspective shifting is delegated to the AI CLI.
+        The rule engine can't do this well. Panel display relies on ai_task_description;
+        this field is only for context passing.
         """
         first_line = text.split("\n")[0].strip()
         if not first_line:
             return ""
         if len(first_line) > 40:
-            first_line = first_line[:40] + "…"
+            first_line = first_line[:40] + "\u2026"
         return first_line
 
     def _add_message(self, session, role, text):
-        """添加一条对话消息，保留最近的 user 和 assistant 各 3 条。"""
+        """Add a conversation message, keeping the latest 3 each for user and assistant."""
         session.recent_messages.append({"role": role, "text": text})
-        # 分别保留各角色最近 3 条，再按原顺序合并
+        # Keep latest 3 per role, then merge in original order
         user_msgs = [m for m in session.recent_messages if m["role"] == "user"][-3:]
         asst_msgs = [m for m in session.recent_messages if m["role"] == "assistant"][-3:]
-        # 按在原列表中的出现顺序重建
         kept = set()
         for m in user_msgs + asst_msgs:
             kept.add(id(m))
         session.recent_messages = [m for m in session.recent_messages if id(m) in kept]
 
     def _parse_timestamp(self, ts):
-        """解析 ISO 8601 时间戳，返回 epoch 秒。"""
+        """Parse ISO 8601 timestamp, return epoch seconds."""
         if not ts:
             return None
         try:
-            # 处理带 Z 或 +00:00 的时间戳
             ts = ts.replace("Z", "+00:00")
             dt = datetime.fromisoformat(ts)
             return dt.timestamp()
@@ -363,17 +396,17 @@ class ContentReader:
             return None
 
     def _try_applescript_terminal(self):
-        """通过 AppleScript 获取 Terminal.app 内容。"""
+        """Get Terminal.app content via AppleScript."""
         script = 'tell application "Terminal" to get contents of selected tab of front window'
         return self._run_osascript(script)
 
     def _try_applescript_ghostty(self):
-        """通过 AppleScript 获取 Ghostty 内容。"""
+        """Get Ghostty content via AppleScript."""
         script = 'tell application "Ghostty" to get contents of current terminal of front window'
         return self._run_osascript(script)
 
     def _try_tmux(self):
-        """通过 tmux capture-pane 获取内容。"""
+        """Get content via tmux capture-pane."""
         if not os.environ.get("TMUX"):
             return ""
         try:
@@ -388,7 +421,7 @@ class ContentReader:
         return ""
 
     def _run_osascript(self, script):
-        """执行 osascript，返回输出或空字符串。"""
+        """Execute osascript, return output or empty string."""
         try:
             result = subprocess.run(
                 ["osascript", "-e", script],

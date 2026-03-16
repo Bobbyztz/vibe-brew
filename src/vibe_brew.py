@@ -1,14 +1,16 @@
-"""主入口模块 (vibe_brew)
+"""Main entry module (vibe_brew)
 
-vibe-brew 的唯一入口，安装后运行 `vibe-brew` 启动。包含主循环和
-TUI 渲染器两部分：
+The sole entry point for vibe-brew. After installation, run `vibe-brew` to start.
+Contains the main loop and TUI renderer:
 
-主循环每 2 秒执行一轮流水线：发现活跃对话流 → 读取内容 → 检测状态变化
-→ 生成建议 → 渲染 TUI。会话列表采用稳定排序（新会话追加到末尾，已有会话
-保持原位），避免 TUI 闪烁。
+The main loop runs a pipeline every 2 seconds: discover active sessions -> read content
+-> detect state changes -> generate advice -> render TUI. Session list uses stable
+ordering (new sessions appended at the end, existing sessions keep their position)
+to avoid TUI flickering.
 
-Renderer 类使用 alternate screen buffer 实现全屏 TUI，支持 CJK 字符宽度
-计算、会话状态图标（⟳/●/⚠）、建议区展示，Ctrl+C 优雅退出并恢复终端。
+The Renderer class uses an alternate screen buffer for full-screen TUI, supports CJK
+character width calculation, session state icons, advice display area, and graceful
+Ctrl+C exit with terminal restoration.
 """
 
 import os
@@ -21,31 +23,32 @@ from .content_reader import ContentReader
 from .state_detector import StateDetector, Changes
 from .advisor import Advisor
 from .terminal_renamer import TerminalRenamer
+from .i18n import init_lang, detect_from_sessions, t, get_error_templates
 
 
 class Renderer:
-    """终端 TUI 渲染器，使用 alternate screen buffer。"""
+    """Terminal TUI renderer using alternate screen buffer."""
 
     def __init__(self):
         self._in_alt_screen = False
 
     def enter(self):
-        """进入 alternate screen buffer。"""
-        sys.stdout.write("\033[?1049h")  # 进入
-        sys.stdout.write("\033[?25l")    # 隐藏光标
+        """Enter alternate screen buffer."""
+        sys.stdout.write("\033[?1049h")  # enter
+        sys.stdout.write("\033[?25l")    # hide cursor
         sys.stdout.flush()
         self._in_alt_screen = True
 
     def leave(self):
-        """退出 alternate screen buffer，恢复终端。"""
+        """Leave alternate screen buffer, restore terminal."""
         if self._in_alt_screen:
-            sys.stdout.write("\033[?25h")    # 显示光标
-            sys.stdout.write("\033[?1049l")  # 退出
+            sys.stdout.write("\033[?25h")    # show cursor
+            sys.stdout.write("\033[?1049l")  # leave
             sys.stdout.flush()
             self._in_alt_screen = False
 
     def render(self, sessions, advice):
-        """渲染一帧 TUI。"""
+        """Render one TUI frame."""
         try:
             cols = os.get_terminal_size().columns
         except OSError:
@@ -54,38 +57,38 @@ class Renderer:
 
         lines = []
 
-        # 标题栏
+        # Title bar
         title = " vibe-brew "
         pad = cols - len(title) - 2
         left_pad = pad // 2
         right_pad = pad - left_pad
-        lines.append("╔" + "═" * left_pad + title + "═" * right_pad + "╗")
-        lines.append("║" + " " * (cols - 2) + "║")
+        lines.append("\u2554" + "\u2550" * left_pad + title + "\u2550" * right_pad + "\u2557")
+        lines.append("\u2551" + " " * (cols - 2) + "\u2551")
 
         if not sessions:
-            msg = "暂无活跃对话"
+            msg = t("no_sessions")
             msg_pad = cols - 2 - self._display_width(msg)
-            lines.append("║ " + msg + " " * max(msg_pad - 1, 0) + "║")
+            lines.append("\u2551 " + msg + " " * max(msg_pad - 1, 0) + "\u2551")
         else:
             for i, s in enumerate(sessions):
-                # 状态图标（完成优先于报错，中途出错但最终跑完的算完成）
+                # Status icon (completed takes priority over error)
                 if s.is_completed:
-                    icon = "●"
+                    icon = "\u25cf"
                 elif s.has_error:
-                    icon = "⚠"
+                    icon = "\u26a0"
                 else:
-                    icon = "⟳"
+                    icon = "\u27f3"
 
                 cli_name = "Claude Code" if s.cli_type == "claude" else "Codex"
                 ws_short = os.path.basename(s.workspace) if s.workspace else "?"
 
                 task = s.ai_task_description or s.task_summary or ""
-                task_part = f" · {task}" if task else ""
-                header = f" {icon} {cli_name} · {ws_short}{task_part}"
+                task_part = f" \u00b7 {task}" if task else ""
+                header = f" {icon} {cli_name} \u00b7 {ws_short}{task_part}"
                 header_line = self._pad_line(header, cols)
-                lines.append("║" + header_line + "║")
+                lines.append("\u2551" + header_line + "\u2551")
 
-                # 状态详情 + 时间（如 "进行中 5min"）
+                # Status detail + elapsed time (e.g. "Running 5min")
                 detail = self._format_status(s)
                 if not s.is_completed and s.wait_seconds:
                     if s.wait_seconds < 60:
@@ -93,45 +96,45 @@ class Renderer:
                     else:
                         detail += f" {int(s.wait_seconds / 60)}min"
                 for dl in self._wrap_lines(f"   {detail}", cols, indent=3, max_lines=2):
-                    lines.append("║" + self._pad_line(dl, cols) + "║")
+                    lines.append("\u2551" + self._pad_line(dl, cols) + "\u2551")
 
-                # 处理中时显示当前工具动作（如 Read main.py）
+                # Show current tool action when in progress (e.g. Read main.py)
                 if not s.is_completed and s.current_action:
-                    action_line = self._pad_line(f"   → {s.current_action}", cols)
-                    lines.append("║" + action_line + "║")
+                    action_line = self._pad_line(f"   \u2192 {s.current_action}", cols)
+                    lines.append("\u2551" + action_line + "\u2551")
 
-                # 会话之间加空行
+                # Blank line between sessions
                 if i < len(sessions) - 1:
-                    lines.append("║" + " " * (cols - 2) + "║")
+                    lines.append("\u2551" + " " * (cols - 2) + "\u2551")
 
-        # 监控区底部空行 + 分隔线 + 建议区顶部空行
-        lines.append("║" + " " * (cols - 2) + "║")
-        lines.append("╠" + "─" * (cols - 2) + "╣")
-        lines.append("║" + " " * (cols - 2) + "║")
+        # Bottom of monitor area + separator + top of advice area
+        lines.append("\u2551" + " " * (cols - 2) + "\u2551")
+        lines.append("\u2560" + "\u2500" * (cols - 2) + "\u2563")
+        lines.append("\u2551" + " " * (cols - 2) + "\u2551")
 
-        # 建议区（支持折行，每条建议后加空行增加呼吸感）
+        # Advice area (supports wrapping, blank line between items for breathing room)
         if advice:
             advice_lines = advice.split("\n")
             for i, aline in enumerate(advice_lines):
                 content = f" {aline}"
                 for wl in self._wrap_lines(content, cols, indent=3, max_lines=2):
                     padded = self._pad_line(wl, cols)
-                    lines.append("║" + padded + "║")
+                    lines.append("\u2551" + padded + "\u2551")
                 if i < len(advice_lines) - 1:
-                    lines.append("║" + " " * (cols - 2) + "║")
+                    lines.append("\u2551" + " " * (cols - 2) + "\u2551")
         else:
-            hint = " 等待建议生成中..."
-            lines.append("║" + self._pad_line(hint, cols) + "║")
+            hint = " " + t("generating")
+            lines.append("\u2551" + self._pad_line(hint, cols) + "\u2551")
 
-        # 底部
-        lines.append("║" + " " * (cols - 2) + "║")
-        footer = " Ctrl+C 退出"
-        lines.append("╚" + "═" * (cols - 2 - self._display_width(footer)) + footer + "╝")
+        # Footer
+        lines.append("\u2551" + " " * (cols - 2) + "\u2551")
+        footer = " " + t("exit_hint")
+        lines.append("\u255a" + "\u2550" * (cols - 2 - self._display_width(footer)) + footer + "\u255d")
 
-        # 输出
+        # Output
         output = "\033[H"  # cursor home
         output += "\n".join(lines)
-        # 清除剩余行
+        # Clear remaining lines
         try:
             rows = os.get_terminal_size().lines
         except OSError:
@@ -143,49 +146,43 @@ class Renderer:
         sys.stdout.write(output)
         sys.stdout.flush()
 
-    # 出错状态模板
-    _TPL_ERROR = [
-        "{s}时遇到问题",
-        "{s}出了点状况",
-    ]
-
     def _format_status(self, session):
-        """生成面板状态描述文本。
+        """Generate panel status description text.
 
-        监控区只显示简洁状态，任务描述已移至建议区展示。
-        出错时保留详情方便快速定位。
+        The monitor area shows only concise status; task description is shown
+        in the advice area. Error details are kept for quick identification.
         """
         if session.is_completed:
-            return "处理完毕"
+            return t("status_done")
         elif session.has_error:
             desc = session.ai_task_description
             fallback = session.task_summary
             if desc:
-                return self._pick_tpl(self._TPL_ERROR, session.session_id, desc)
+                return self._pick_tpl(get_error_templates(), session.session_id, desc)
             err = session.error_message[:20] if session.error_message else ""
             if err:
-                return f"遇到了问题：{err}"
+                return t("error_with_msg").format(err=err)
             if fallback:
-                return f"处理时出错 · {fallback}"
-            return "遇到了问题"
+                return t("error_with_task").format(task=fallback)
+            return t("status_error")
         else:
-            return "进行中"
+            return t("status_running")
 
-    # CJK 标点和空格，适合在其后换行
-    _BREAK_AFTER = set(" \t，。；！？、）】》」』：")
+    # CJK punctuation and spaces, suitable for line-breaking after
+    _BREAK_AFTER = set(" \t,.;!?\u3001\uff09\u3011\u300b\u300d\u300f\uff1a\uff0c\u3002\uff1b\uff01\uff1f")
 
     def _wrap_lines(self, text, cols, indent=3, max_lines=2):
-        """按显示宽度折行，优先在空格/标点后断开。
+        """Wrap text by display width, preferring breaks after spaces/punctuation.
 
-        第二行起缩进 indent+2 格，最多 max_lines 行。
+        Lines after the first are indented by indent+2 spaces, up to max_lines.
         """
-        avail = cols - 2  # 两侧 ║ 占位
+        avail = cols - 2  # two sides for box chars
         if self._display_width(text) <= avail:
             return [text]
 
-        # 逐字符扫描，记录最近可断点
-        best_break = 0   # 最近可断点的字符索引（断在该字符之后）
-        best_break_w = 0  # 该断点对应的显示宽度
+        # Scan char by char, tracking the best break point
+        best_break = 0
+        best_break_w = 0
         w = 0
         for i, ch in enumerate(text):
             cw = 2 if ord(ch) > 0x7F else 1
@@ -194,12 +191,9 @@ class Renderer:
                 best_break = i + 1
                 best_break_w = w
             if w > avail:
-                # 需要断行
                 if best_break > 0 and best_break_w > avail * 0.4:
-                    # 在可断点处断开（不能太靠前，否则第一行太短）
                     split = best_break
                 else:
-                    # 没有好的断点，硬切
                     split = i
                 line1 = text[:split]
                 prefix = " " * (indent + 2)
@@ -209,37 +203,37 @@ class Renderer:
         return [text]
 
     def _pick_tpl(self, templates, session_id, summary):
-        """按 session_id hash 稳定选模板，同一会话不会每帧跳动。"""
+        """Pick a template stably by session_id hash, so the same session
+        doesn't change template every frame."""
         idx = hash(session_id) % len(templates)
         return templates[idx].format(s=summary)
 
     def _pad_line(self, text, cols):
-        """将文本填充到 cols-2 的显示宽度，保证单行安全。"""
-        # 防御多行内容：只取第一行
+        """Pad text to cols-2 display width, ensuring single-line safety."""
+        # Defense against multi-line content: take only the first line
         text = text.split("\n")[0]
         target = cols - 2
         width = self._display_width(text)
         if width < target:
             return text + " " * (target - width)
         elif width > target:
-            # 按显示宽度截断（而非字符数），避免 CJK 字符被切半
+            # Truncate by display width (not char count) to avoid cutting CJK chars in half
             result = []
             w = 0
             for ch in text:
                 cw = 2 if ord(ch) > 0x7F else 1
-                if w + cw > target - 1:  # 留 1 列给 "…"
-                    result.append("…")
+                if w + cw > target - 1:  # reserve 1 col for ellipsis
+                    result.append("\u2026")
                     break
                 result.append(ch)
                 w += cw
             truncated = "".join(result)
-            # 补齐到 target 宽度
             pad = target - self._display_width(truncated)
             return truncated + " " * max(pad, 0)
         return text
 
     def _display_width(self, text):
-        """粗略计算显示宽度（CJK 字符占 2 列）。"""
+        """Roughly calculate display width (CJK characters take 2 columns)."""
         w = 0
         for ch in text:
             if ord(ch) > 0x7F:
@@ -250,6 +244,17 @@ class Renderer:
 
 
 def main():
+    # Parse --lang flag
+    lang_arg = None
+    args = sys.argv[1:]
+    if "--lang" in args:
+        idx = args.index("--lang")
+        if idx + 1 < len(args):
+            lang_arg = args[idx + 1]
+
+    # Initialize language (must happen before Advisor, which loads WaitDex)
+    init_lang(lang_arg)
+
     discoverer = SessionDiscoverer()
     reader = ContentReader()
     detector = StateDetector()
@@ -257,10 +262,10 @@ def main():
     renderer = Renderer()
     renamer = TerminalRenamer()
 
-    # 进入 alternate screen
+    # Enter alternate screen
     renderer.enter()
 
-    # 捕获 Ctrl+C
+    # Catch Ctrl+C
     def handle_sigint(_sig, _frame):
         renderer.leave()
         sys.exit(0)
@@ -269,55 +274,60 @@ def main():
 
     last_advice = ""
     sessions_state = {}
-    session_order = []  # 记录 session_id 首次出现顺序，锁定排序
+    session_order = []  # Track session_id first-seen order to lock sorting
 
     try:
         while True:
-            # 1. 发现活跃对话流
+            # 1. Discover active sessions
             sessions = discoverer.discover()
 
-            # 稳定排序：新 session 追加到末尾，已有 session 保持原位
+            # Stable sort: new sessions appended at end, existing sessions keep position
             seen_ids = {s.session_id for s in sessions}
-            # 清理已消失的 session
+            # Remove disappeared sessions
             session_order = [sid for sid in session_order if sid in seen_ids]
-            # 追加新出现的 session
+            # Append newly appeared sessions
             for s in sessions:
                 if s.session_id not in session_order:
                     session_order.append(s.session_id)
-            # 按锁定顺序排列
+            # Sort by locked order
             order_map = {sid: i for i, sid in enumerate(session_order)}
             sessions.sort(key=lambda s: order_map[s.session_id])
 
-            # 2. 读取每个对话流的内容
+            # 2. Read content for each session
             for session in sessions:
                 reader.update(session)
 
-            # 3. 检测状态变化
+            # 2.5. Auto-detect language from session content (only in auto mode)
+            if detect_from_sessions(sessions):
+                # Language changed — reinitialize advisor to reload WaitDex
+                advisor = Advisor()
+
+            # 3. Detect state changes
             changes = detector.detect(sessions, sessions_state)
             sessions_state = detector.snapshot(sessions)
 
-            # 4. 每轮都调 generate()：内部非阻塞，自行管理限流和异步 CLI
+            # 4. Call generate() every cycle: internally non-blocking, self-manages rate limiting and async CLI
             if sessions:
                 force = changes.has_significant_change()
-                # 仅在真正的状态转换时清空旧建议（新会话/完成/报错）
-                # 工具切换(action_changed)太频繁，不清空
+                # Only clear old advice on real state transitions (new session/completed/error)
+                # Tool switches (action_changed) are too frequent, don't clear
                 if changes.new_sessions or changes.completed or changes.errors:
                     last_advice = ""
                 result = advisor.generate(sessions, force=force)
                 if result is not None:
                     last_advice = result
-                # advisor 可能通过 _poll_pending 回填了 ai_task_description，
-                # 同步回 reader 缓存，否则下轮会被旧缓存覆盖
+                # Advisor may have backfilled ai_task_description via _poll_pending;
+                # sync back to reader cache, otherwise next cycle's cache restore overwrites
                 for session in sessions:
                     reader.sync_ai_description(session)
 
             if not sessions:
                 last_advice = ""
 
-            # 5. 重命名终端标签（内部限流，每 10 秒最多一次）
+            # 5. Rename terminal tabs (internally rate-limited, at most once per 10s)
             renamer.rename(sessions)
 
-            # 6. 渲染 TUI
+            # 6. Render TUI
             renderer.render(sessions, last_advice)
 
             time.sleep(2)

@@ -1,150 +1,150 @@
-# 产品需求文档 (PRD)
+# Product Requirements Document (PRD)
 
-## 1. 产品定位
+## 1. Product Positioning
 
-vibe-brew 是一个 AI 编程等待期助手。它监控用户正在进行的 AI 编码对话流，理解每个对话的实时状态和内容，结合 WaitDex 等待期策略框架，生成上下文感知的行动建议。
+vibe-brew is an AI coding wait-time assistant. It monitors users' active AI coding conversations, understands the real-time state and content of each session, and generates context-aware action suggestions based on the WaitDex wait-time strategy framework.
 
-**一句话**：让 vibe coding 的等待期从"空耗"变成"恢复和准备"。
+**In one sentence**: Turn vibe coding wait time from "idle drain" into "recovery and preparation."
 
-## 1.1 最重要的设计原则：不增加负担
+## 1.1 Most Important Design Principle: Don't Add Burden
 
-vibe-brew 是一个 toy，不是一个严肃的生产力工具。
+vibe-brew is a toy, not a serious productivity tool.
 
-它的全部交互就是：用户扫一眼，随手 pick 一条建议，然后去做。没有需要阅读的长文、没有需要思考的决策、没有需要操作的按钮。
+Its entire interaction is: user glances, casually picks one suggestion, then goes and does it. No long texts to read, no decisions to ponder, no buttons to operate.
 
-**反面教材**：把 WaitDex.md 的完整内容展示给用户，让他们每次都读一遍然后思考自己该做什么——这恰好是 vibe-brew 要消灭的事情。WaitDex 是给模型看的上下文，不是给用户看的界面。
+**Anti-pattern**: Showing the full WaitDex.md content to users, making them read through it each time and think about what to do — this is exactly what vibe-brew aims to eliminate. WaitDex is context for the model, not UI for the user.
 
-**输出标准**：
-- 摘要：最多三行，说清楚 AI 在干嘛、干到哪了
-- 建议：1-3 条，随便挑一条就行，不需要全做
-- 语气：随意的、轻松的，像朋友顺口说一句，不像系统下达指令
+**Output Standards**:
+- Summary: at most three lines, clearly stating what the AI is doing and how far along
+- Suggestions: 1-3 items, just pick any one — no need to do them all
+- Tone: casual, relaxed, like a friend mentioning something offhand, not a system issuing commands
 
-## 2. 目标用户
+## 2. Target Users
 
-使用 Claude Code、Codex 等 AI CLI 工具进行日常开发的程序员。他们：
+Programmers using Claude Code, Codex, and other AI CLI tools for daily development. They:
 
-- 每天与 AI 协作多轮，累计等待时间可达 1-2 小时
-- 在等待期间容易陷入刷手机或死盯日志的低效模式
-- 希望有一个轻量工具帮助管理等待期，而不需要改变现有工作流
-- 使用 macOS，终端为 Terminal.app、Ghostty 或 tmux
+- Collaborate with AI multiple rounds per day, accumulating 1-2 hours of wait time
+- Tend to fall into low-efficiency patterns of scrolling phone or staring at logs during waits
+- Want a lightweight tool to manage wait time without changing their existing workflow
+- Use macOS, with Terminal.app, Ghostty, or tmux
 
-## 3. 核心场景
+## 3. Core Scenarios
 
-### 场景 A：单对话等待
+### Scenario A: Single Session Wait
 
-用户在一个终端里跑 Claude Code，AI 正在执行一轮修改（3-5 分钟）。vibe-brew 识别到这个对话流，读取其状态（正在改什么文件、跑什么工具），给出建议："Claude 正在跑测试，预计还需 2 分钟，起身接杯水；回来后先看 auth.py 的 diff。"
+User is running Claude Code in one terminal, AI is executing a round of changes (3-5 minutes). vibe-brew detects this conversation, reads its state (which files are being modified, which tools are running), and suggests: "Claude is running tests, probably 2 more minutes — grab some water; check the auth.py diff when you're back."
 
-### 场景 B：多对话并行
+### Scenario B: Parallel Sessions
 
-用户同时开了两个 Claude Code 对话（不同 workspace），一个在重构、一个刚完成。vibe-brew 同时监控两个对话流，建议："workspace A 的重构还在跑，先去 review workspace B 刚完成的 API 改动。"
+User has two Claude Code sessions open simultaneously (different workspaces), one refactoring, one just finished. vibe-brew monitors both, suggesting: "Workspace A's refactoring is still running, go review workspace B's API changes first."
 
-### 场景 C：任务完成通知
+### Scenario C: Task Completion Notification
 
-一个长时间运行的对话突然完成。vibe-brew 检测到状态变化，立即更新建议："Codex 已完成，改了 5 个文件，测试全部通过。建议先看 routes.py，再看测试覆盖。"
+A long-running session suddenly completes. vibe-brew detects the state change and immediately updates: "Codex is done, changed 5 files, all tests passed. Check routes.py first, then test coverage."
 
-### 场景 D：异常检测
+### Scenario D: Anomaly Detection
 
-Claude Code 在某一步卡住超过预期时间，或者出现了报错。vibe-brew 提示："Claude Code 似乎卡在依赖安装上（已等待 8 分钟），可能需要你介入检查。"
+Claude Code gets stuck at a step longer than expected, or encounters an error. vibe-brew prompts: "Claude Code seems stuck on dependency installation (waiting 8 minutes), you might need to check in."
 
-## 4. 核心设计决策
+## 4. Core Design Decisions
 
-### 4.1 按对话流监控，而非按进程类型
+### 4.1 Monitor by Conversation Flow, Not Process Type
 
-**错误的模型**：把 python、node、cargo 等作为独立任务展示——它们之间没有关联，且产生大量噪音。
+**Wrong model**: Displaying python, node, cargo etc. as independent tasks — they have no relation to each other and create noise.
 
-**正确的模型**：以 AI CLI 对话流为顶层单位，子进程归属到对应的对话流下。
+**Right model**: Use AI CLI conversation flow as the top-level unit, with subprocesses attributed to their corresponding flow.
 
 ```
-Claude Code (~/project-a, session abc123)    ← 对话流
-  ├── npm test                                ← 子任务
-  ├── python migrate.py                       ← 子任务
-  └── cargo build                             ← 子任务
+Claude Code (~/project-a, session abc123)    ← conversation flow
+  ├── npm test                                ← subtask
+  ├── python migrate.py                       ← subtask
+  └── cargo build                             ← subtask
 ```
 
-对话流通过以下方式识别：
-- 进程树：Claude Code / Codex 进程是父进程，其下的子进程属于该对话流
-- 会话文件：每个 JSONL 文件对应一个对话流，包含 workspace 路径
+Conversation flows are identified via:
+- Process tree: Claude Code / Codex process is the parent, child processes belong to that flow
+- Session files: each JSONL file corresponds to a flow, containing workspace path
 
-### 4.2 必须获取对话内容
+### 4.2 Must Access Conversation Content
 
-只知道"Claude Code 在跑"价值很低。用户需要知道：
-- AI 当前在做什么（修改文件？跑测试？安装依赖？）
-- 进展如何（改了几个文件？测试通过了吗？）
-- 有没有异常（报错？卡住？等待输入？）
+Just knowing "Claude Code is running" has very low value. Users need to know:
+- What the AI is currently doing (modifying files? running tests? installing dependencies?)
+- How it's progressing (how many files changed? tests passing?)
+- Any anomalies (errors? stuck? waiting for input?)
 
-获取方式（按优先级）：
-1. **JSONL 会话文件直读**：Claude Code 写入 `~/.claude/projects/`，Codex 写入 `~/.codex/sessions/`，包含完整结构化数据
-2. **终端内容获取**：AppleScript（Terminal.app、Ghostty）或 tmux capture-pane，作为兜底
+Acquisition methods (by priority):
+1. **Direct JSONL session file reading**: Claude Code writes to `~/.claude/projects/`, Codex writes to `~/.codex/sessions/`, containing complete structured data
+2. **Terminal content capture**: AppleScript (Terminal.app, Ghostty) or tmux capture-pane, as fallback
 
-### 4.3 建议策略基于 WaitDex
+### 4.3 Suggestion Strategy Based on WaitDex
 
-所有建议遵循 WaitDex 的优先级框架：
-1. 直接提高下一轮产出（审视目标、草拟 prompt、列验收清单）
-2. 低脑耗小维护（整理 TODO、关标签页）
-3. 身体维护（起身、接水、拉伸）
-4. 轻量娱乐（必须秒停）
+All suggestions follow the WaitDex priority framework:
+1. Directly improve next-round output (review goals, draft prompts, list acceptance criteria)
+2. Low-brain-cost maintenance (organize TODOs, close tabs)
+3. Physical maintenance (stand up, get water, stretch)
+4. Light entertainment (must be instantly stoppable)
 
-并根据等待时长动态调整：
-- 2 分钟以内 → 身体重置
-- 2-10 分钟 → 准备 + 维护
-- 10 分钟以上 → 边界明确的小闭环
+Dynamically adjusted by wait duration:
+- Under 2 minutes → physical reset
+- 2-10 minutes → preparation + maintenance
+- Over 10 minutes → bounded small tasks
 
-### 4.4 复用已有 AI CLI 额度，而非强依赖本地模型
+### 4.4 Reuse Existing AI CLI Subscription, Not Local Models
 
-用户既然在 vibe coding，就已经安装了 Claude Code 或 Codex CLI 并有有效订阅。vibe-brew 直接通过 `subprocess` 调用这些已安装的 CLI 生成建议，无需用户配置任何 API key。
+Since users are vibe coding, they already have Claude Code or Codex CLI installed with active subscriptions. vibe-brew calls these installed CLIs directly via `subprocess` to generate advice, requiring no API key configuration.
 
-策略：
-- **默认**：通过 `subprocess` 调用用户已安装的 AI CLI（`claude -p --no-session-persistence`），复用其已有订阅额度
-- 生成 1-3 条建议的 token 消耗极低（< 500 tokens/次），成本可忽略
-- `--no-session-persistence` 确保建议生成调用不写入 JSONL 会话文件，避免被 vibe-brew 自身的 session discovery 发现，实现"阅后即焚"
-- **兜底**：CLI 不可用时，基于 WaitDex 规则 + 等待时长直接匹配建议（纯规则引擎，无需任何外部依赖）
+Strategy:
+- **Default**: Call user's installed AI CLI via `subprocess` (`claude -p --no-session-persistence`), reusing existing subscription
+- Generating 1-3 suggestions costs very few tokens (< 500 tokens/call), negligible cost
+- `--no-session-persistence` ensures advice generation calls don't write JSONL session files, preventing self-discovery by vibe-brew's session discovery — ephemeral by design
+- **Fallback**: When CLI is unavailable, match suggestions using WaitDex rules + wait duration (pure rule engine, no external dependencies)
 
-## 5. MVP 功能范围（Phase 0）
+## 5. MVP Feature Scope (Phase 0)
 
-### 必须有
+### Must Have
 
-- [ ] 发现并列出系统中所有 Claude Code / Codex 对话流
-- [ ] 通过 JSONL 文件读取每个对话流的实时状态和内容摘要
-- [ ] 通过 AppleScript / tmux 获取终端内容作为兜底
-- [ ] 检测对话流状态变化（新增、完成、报错、超时）
-- [ ] 将状态 + WaitDex 策略交给 AI CLI（`claude -p --no-session-persistence`）生成建议，CLI 不可用时兜底到规则引擎
-- [ ] 终端 TUI 展示对话流列表和建议
+- [ ] Discover and list all Claude Code / Codex sessions on the system
+- [ ] Read real-time state and content summaries for each session via JSONL files
+- [ ] Get terminal content via AppleScript / tmux as fallback
+- [ ] Detect session state changes (new, completed, error, timeout)
+- [ ] Feed state + WaitDex strategy to AI CLI (`claude -p --no-session-persistence`) for advice generation, fall back to rule engine when CLI unavailable
+- [ ] Terminal TUI displaying session list and suggestions
 
-### 不做（留给后续 Phase）
+### Not Now (Later Phases)
 
-- 菜单栏 App
-- 桌面宠物
-- 系统通知
-- 多 AI provider 支持（API key 直调、Ollama 本地模型等）
-- 插件系统
+- Menu bar app
+- Desktop pet
+- System notifications
+- Multiple AI provider support (API key direct calls, Ollama local models, etc.)
+- Plugin system
 
-## 6. 建议生成策略
+## 6. Advice Generation Strategy
 
-### 输入：尽量少
+### Input: As Little As Possible
 
-模型只需要看到当前这一轮对话的状态（可选加上一轮增强可理解性）。不需要完整对话历史，不需要代码内容。
+The model only needs the current round's conversation state (optionally plus previous round for context). No full conversation history needed, no code content.
 
-Prompt 上下文：
-1. **当前对话流状态**：AI 在干什么、干了多久、改了哪些文件、有无异常
-2. **WaitDex 策略框架**：作为 in-context learning 注入，引导模型的建议方向——这是给模型看的，不是给用户看的
+Prompt context:
+1. **Current session state**: What the AI is doing, how long, which files, any anomalies
+2. **WaitDex strategy framework**: Injected as in-context learning to guide the model's suggestion direction — this is for the model, not the user
 
-### 输出：尽量轻
+### Output: As Light As Possible
 
-- 摘要：最多三行（AI 在做什么、进展、异常）
-- 建议：1-3 条，每条半句话到一句话
-- 语气：随意、口语化，像朋友顺嘴一提
-- 用户的正确使用方式：扫一眼，随手 pick 一条，走人
+- Summary: at most three lines (what the AI is doing, progress, anomalies)
+- Suggestions: 1-3 items, each half a sentence to one sentence
+- Tone: casual, conversational, like a friend mentioning something offhand
+- Correct usage: glance, pick one, walk away
 
-### 反模式
+### Anti-patterns
 
-- ❌ 给出 4 条以上建议让用户挑选——这变成了决策
-- ❌ 建议写得很正式很完整——这变成了阅读任务
-- ❌ 列出 WaitDex 的优先级框架让用户自己判断——这变成了学习任务
-- ❌ 每条建议都解释为什么——没人在乎，去接水就对了
+- ❌ Giving 4+ suggestions for users to choose from — this becomes a decision
+- ❌ Writing suggestions formally and completely — this becomes a reading task
+- ❌ Listing WaitDex priority framework for users to judge themselves — this becomes a learning task
+- ❌ Explaining why for each suggestion — nobody cares, just go get water
 
-## 7. 非功能需求
+## 7. Non-functional Requirements
 
-- **资源占用**：CPU < 5%，内存 < 100MB
-- **响应延迟**：状态变化后 10 秒内更新建议
-- **零配置启动**：有 AI CLI 环境即可运行，无需额外安装，无需配置 API key
-- **隐私**：通过 CLI 调用仅发送对话状态摘要（非原始代码）；CLI 不可用时纯规则引擎本地运行
+- **Resource usage**: CPU < 5%, memory < 100MB
+- **Response latency**: Update advice within 10 seconds of state change
+- **Zero-config startup**: Works with AI CLI environment, no extra installation, no API key config
+- **Privacy**: CLI calls only send conversation state summaries (not raw code); pure rule engine runs locally when CLI unavailable

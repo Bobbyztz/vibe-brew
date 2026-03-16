@@ -1,47 +1,47 @@
-# 演进路线
+# Roadmap
 
-## Phase 0 — CLI Demo（当前）
+## Phase 0 — CLI Demo (Current)
 
-**目标**：验证"对话流监控 + 内容理解 + WaitDex 建议"这条路走不走得通。
+**Goal**: Validate whether "conversation flow monitoring + content understanding + WaitDex suggestions" is a viable approach.
 
-- `src/` 下按模块组织，终端里运行 `python src/vibe_brew.py`
-- 发现系统中活跃的 Claude Code / Codex 对话流
-- 通过 JSONL 直读获取对话内容和状态
-- 通过 AppleScript / tmux 获取终端内容作为兜底
-- 检测状态变化，结合 WaitDex 策略生成建议
-- 简易 TUI 展示
+- Modules organized under `src/`, run via `python src/vibe_brew.py` in terminal
+- Discover active Claude Code / Codex sessions on the system
+- Get conversation content and state via direct JSONL reading
+- Get terminal content via AppleScript / tmux as fallback
+- Detect state changes, generate suggestions using WaitDex strategy
+- Simple TUI display
 
-**做完就能回答的问题**：
-- JSONL 直读能不能稳定获取对话状态？
-- 云端轻量模型 + WaitDex 上下文的建议有没有实际价值？
-- 用户愿不愿意多开一个终端来跑这个？
+**Questions answered upon completion**:
+- Can direct JSONL reading reliably capture conversation state?
+- Do lightweight cloud model + WaitDex context suggestions have real value?
+- Are users willing to keep an extra terminal open for this?
 
-## Phase 1 — 桌面宠物
+## Phase 1 — Desktop Pet
 
-**关键跳跃**：用户不再需要专门开一个终端窗口。
+**Key leap**: Users no longer need to dedicate a terminal window.
 
-**目标**：从工具变成陪伴。
+**Goal**: Transform from tool to companion.
 
-- 屏幕上的小角色（一锅汤、一只动物、一个机器人——随主题而定）
-- 有状态动画：
-  - AI 在跑 → 宠物在搅汤 / 看火
-  - 对话完成 → 宠物举旗 / 敲碗
-  - 等待太久没动 → 宠物打哈欠 / 提醒你站起来
-- 气泡框传达 WaitDex 建议
-- 可拖动、可交互
-- 技术栈：Swift + SpriteKit，或 Electron + Lottie
+- On-screen character (a simmering pot, an animal, a robot — varies by theme)
+- State-driven animations:
+  - AI running → pet is stirring soup / watching the fire
+  - Session completed → pet raises flag / taps bowl
+  - Waiting too long with no activity → pet yawns / reminds you to stand up
+- Speech bubble delivers WaitDex suggestions
+- Draggable, interactive
+- Tech stack: Swift + SpriteKit, or Electron + Lottie
 
-**关键跳跃**：情感连接。它不只是一个监控面板，它是你 vibe coding 时的搭档。
+**Key leap**: Emotional connection. It's not just a monitoring panel — it's your vibe coding companion.
 
-## Phase 2 — 社区与生态
+## Phase 2 — Community & Ecosystem
 
-**愿景**：让每个 vibe coder 都有自己的 brew 方式。
+**Vision**: Let every vibe coder have their own brew style.
 
-- 宠物皮肤和主题市场
-- 插件系统：自定义监控规则、自定义建议策略
-- 更多模型 provider 支持
-- 团队模式：看到队友的 brew 状态，异步协作时知道彼此在做什么
-- 跨平台：Linux、Windows 支持（Phase 3+）
-- 自定义 WaitDex 策略：基于个人习惯调整建议优先级
+- Pet skins and theme marketplace
+- Plugin system: custom monitoring rules, custom suggestion strategies
+- More model provider support
+- Team mode: see teammates' brew status, know what each other is working on during async collaboration
+- Cross-platform: Linux, Windows support (Phase 3+)
+- Custom WaitDex strategies: adjust suggestion priorities based on personal habits
 
-这个阶段的具体形态取决于 Phase 0-2 的用户反馈，不过早规划实现细节。
+Specific form for this phase depends on user feedback from Phases 0-2; implementation details not planned prematurely.

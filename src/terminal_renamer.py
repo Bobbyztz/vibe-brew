@@ -1,10 +1,11 @@
-"""终端标签重命名模块 (terminal_renamer)
+"""Terminal tab renaming module (terminal_renamer)
 
-自动检测终端标签页的工作目录，将运行 AI CLI 的标签重命名为项目名称，
-解决多个标签都显示 "claude" / "codex" 无法区分的问题。
+Automatically detects terminal tab working directories and renames tabs running
+AI CLI to the project name, solving the problem of multiple tabs all showing
+"claude" / "codex" with no way to tell them apart.
 
-支持：Ghostty（AppleScript API 直读 working directory，需 v1.3+）、
-Terminal.app（AppleScript tty + lsof 推断工作目录）。
+Supports: Ghostty (AppleScript API to read working directory, requires v1.3+),
+Terminal.app (AppleScript tty + lsof to infer working directory).
 """
 
 import os
@@ -13,15 +14,15 @@ import time
 
 
 class TerminalRenamer:
-    """检测终端标签并重命名为项目名。"""
+    """Detects terminal tabs and renames them to project names."""
 
-    MIN_INTERVAL = 10  # 秒
+    MIN_INTERVAL = 10  # seconds
 
     def __init__(self):
         self._last_run = 0
 
     def rename(self, sessions):
-        """重命名终端标签。每 MIN_INTERVAL 秒最多执行一次。"""
+        """Rename terminal tabs. Runs at most once per MIN_INTERVAL seconds."""
         now = time.time()
         if now - self._last_run < self.MIN_INTERVAL:
             return
@@ -43,15 +44,15 @@ class TerminalRenamer:
         self._rename_terminal_app(ws_names)
 
     def _rename_ghostty(self, ws_names):
-        """Ghostty: 通过 perform action "set_tab_title:..." 钉住标签标题。
+        """Ghostty: pin tab title via perform action "set_tab_title:...".
 
-        使用 Ghostty 的 set_tab_title action（而非直接设 name 属性），
-        该 action 会"钉住"标题，不会被 CLI 进程的 OSC 转义序列覆盖。
+        Uses Ghostty's set_tab_title action (not direct name property),
+        which pins the title so it won't be overridden by CLI process OSC escape sequences.
         """
         if not self._is_app_running("Ghostty"):
             return
 
-        # 动态生成 if/else 条件：匹配 cwd 后执行 perform action
+        # Dynamically generate if/else conditions: match cwd then perform action
         conditions = []
         for ws, name in ws_names.items():
             safe_ws = ws.replace("\\", "\\\\").replace('"', '\\"')
@@ -88,11 +89,11 @@ class TerminalRenamer:
         self._run_osascript(script)
 
     def _rename_terminal_app(self, ws_names):
-        """Terminal.app: 通过 tty + lsof 推断工作目录并重命名。"""
+        """Terminal.app: infer working directory via tty + lsof and rename."""
         if not self._is_app_running("Terminal"):
             return
 
-        # 一次性获取运行 CC/Codex 的标签的 tty（按标签名过滤）
+        # Get tty of tabs running CC/Codex (filtered by tab name) in one call
         script = (
             'tell application "Terminal"\n'
             '    set r to ""\n'
@@ -133,9 +134,9 @@ class TerminalRenamer:
                 )
 
     def _get_tty_cwd(self, tty):
-        """通过 lsof 获取 tty 上进程的工作目录。"""
+        """Get the working directory of processes on a tty via lsof."""
         try:
-            # 查找该 tty 上的进程（取最小 PID，通常是 shell）
+            # Find processes on this tty (take smallest PID, usually the shell)
             r = subprocess.run(
                 ["lsof", "-t", tty],
                 capture_output=True, text=True, timeout=3,
@@ -145,7 +146,7 @@ class TerminalRenamer:
 
             pid = r.stdout.strip().split("\n")[0].strip()
 
-            # 获取该进程的工作目录
+            # Get working directory of that process
             r = subprocess.run(
                 ["lsof", "-a", "-d", "cwd", "-p", pid, "-Fn"],
                 capture_output=True, text=True, timeout=3,
@@ -161,7 +162,7 @@ class TerminalRenamer:
         return ""
 
     def _is_app_running(self, app_name):
-        """检查应用是否正在运行（不会启动它）。"""
+        """Check if an application is running (won't launch it)."""
         output = self._run_osascript(
             f'tell application "System Events" to return '
             f'(name of every process whose name is "{app_name}") as text'
@@ -169,7 +170,7 @@ class TerminalRenamer:
         return bool(output)
 
     def _run_osascript(self, script):
-        """执行 osascript，返回输出或空字符串。"""
+        """Execute osascript, return output or empty string."""
         try:
             r = subprocess.run(
                 ["osascript", "-e", script],

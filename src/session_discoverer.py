@@ -1,12 +1,14 @@
-"""对话流发现模块 (session_discoverer)
+"""Session discovery module (session_discoverer)
 
-负责发现系统中所有活跃的 AI CLI 对话流。扫描 Claude Code (~/.claude/projects/)
-和 Codex (~/.codex/sessions/) 的 JSONL 会话文件，根据文件修改时间筛选出
-10 分钟内活跃的会话，并结合 ~/.claude/sessions/<PID>.json 中的进程存活信息
-确定每个工作目录下应保留的会话数量。
+Discovers all active AI CLI sessions on the system. Scans Claude Code
+(~/.claude/projects/) and Codex (~/.codex/sessions/) JSONL session files,
+filters for sessions active within the last 10 minutes by file modification time,
+and uses ~/.claude/sessions/<PID>.json process liveness info to determine
+how many sessions to keep per working directory.
 
-本模块定义了 Session 数据类（承载单个对话流的全部状态字段）和 SessionDiscoverer
-服务类（执行发现逻辑），是整个流水线的第一步。
+Defines the Session data class (carrying all state fields for a single session)
+and the SessionDiscoverer service class (executing discovery logic). This is the
+first step in the pipeline.
 """
 
 import os
@@ -16,30 +18,30 @@ import json
 
 
 class Session:
-    """表示一个活跃的 AI CLI 对话流。"""
+    """Represents an active AI CLI session."""
 
     def __init__(self, file_path, cli_type, workspace, session_id):
         self.file_path = file_path
-        self.cli_type = cli_type      # "claude" 或 "codex"
-        self.workspace = workspace    # 工作目录
+        self.cli_type = cli_type      # "claude" or "codex"
+        self.workspace = workspace    # working directory
         self.session_id = session_id
-        # 由 ContentReader 填充
+        # Populated by ContentReader
         self.current_action = ""
         self.files_involved = []
         self.has_error = False
         self.error_message = ""
         self.wait_seconds = 0
         self.is_completed = False
-        self.last_user_time = None     # 最近用户消息时间戳
-        self.recent_messages = []      # 最近的对话消息 [{"role": "user"/"assistant", "text": "..."}]
-        self.task_summary = ""         # 当前任务的高层描述（来自用户最近一条消息）
-        self.ai_task_description = ""  # AI 生成的视角转换描述（覆盖模板）
+        self.last_user_time = None     # timestamp of most recent user message
+        self.recent_messages = []      # recent conversation messages [{"role": "user"/"assistant", "text": "..."}]
+        self.task_summary = ""         # high-level description of current task (from user's latest message)
+        self.ai_task_description = ""  # AI-generated perspective-shifted description (overrides templates)
 
 
 class SessionDiscoverer:
-    """发现系统中活跃的 AI 编码对话流。"""
+    """Discovers active AI coding sessions on the system."""
 
-    ACTIVE_THRESHOLD = 600  # 10 分钟
+    ACTIVE_THRESHOLD = 600  # 10 minutes
 
     def __init__(self):
         self.home = os.path.expanduser("~")
@@ -47,15 +49,15 @@ class SessionDiscoverer:
         self.codex_base = os.path.join(self.home, ".codex", "sessions")
 
     def discover(self):
-        """返回所有活跃 Session 列表。"""
+        """Return a list of all active Sessions."""
         sessions = []
         sessions.extend(self._scan_claude())
         sessions.extend(self._scan_codex())
         return sessions
 
     def _count_active_cc_instances(self):
-        """读取 ~/.claude/sessions/<PID>.json 统计活跃 CC 实例数。
-        返回 {cwd: count}，只计入 PID 仍存活的实例。"""
+        """Read ~/.claude/sessions/<PID>.json to count active CC instances.
+        Returns {cwd: count}, only counting PIDs that are still alive."""
         sessions_dir = os.path.join(self.home, ".claude", "sessions")
         counts = {}
         if not os.path.isdir(sessions_dir):
@@ -65,12 +67,12 @@ class SessionDiscoverer:
                 if not fname.endswith(".json"):
                     continue
                 pid_str = fname[:-5]
-                # 检查 PID 是否存活
+                # Check if PID is still alive
                 try:
                     os.kill(int(pid_str), 0)
                 except (OSError, ValueError):
                     continue
-                # 读取 cwd
+                # Read cwd
                 fpath = os.path.join(sessions_dir, fname)
                 try:
                     with open(fpath, "r", encoding="utf-8") as f:
@@ -85,16 +87,16 @@ class SessionDiscoverer:
         return counts
 
     def _scan_claude(self):
-        """扫描 ~/.claude/projects/ 下的活跃 JSONL。"""
+        """Scan ~/.claude/projects/ for active JSONL files."""
         if not os.path.isdir(self.claude_base):
             return []
 
-        # 统计每个 cwd 有几个活跃 CC 实例
+        # Count active CC instances per cwd
         instance_counts = self._count_active_cc_instances()
 
-        # 按 encoded_cwd 目录收集候选，按 mtime 降序取前 N 个
-        # 有活跃进程的 cwd 不过滤 mtime（终端开着就一直显示）；
-        # 无活跃进程的才按 ACTIVE_THRESHOLD 清理
+        # Collect candidates per encoded_cwd directory, sorted by mtime descending, take top N.
+        # cwds with live processes skip mtime filtering (terminal is open, keep showing);
+        # cwds without live processes filter by ACTIVE_THRESHOLD
         sessions = []
         now = time.time()
         try:
@@ -129,12 +131,12 @@ class SessionDiscoverer:
                 has_live_process = real_workspace in instance_counts
 
                 if has_live_process:
-                    # 进程还活着（终端开着），取最新的 N 个，不管 mtime
+                    # Process still alive (terminal open), take the latest N regardless of mtime
                     n = instance_counts[real_workspace]
                     for _, fpath, workspace, session_id in candidates[:n]:
                         sessions.append(Session(fpath, "claude", workspace, session_id))
                 else:
-                    # 进程已退出，仅保留近期文件用于短暂展示
+                    # Process exited, only keep recent files for brief display
                     for mtime, fpath, workspace, session_id in candidates[:1]:
                         if now - mtime <= self.ACTIVE_THRESHOLD:
                             sessions.append(Session(fpath, "claude", workspace, session_id))
@@ -143,7 +145,7 @@ class SessionDiscoverer:
         return sessions
 
     def has_cli_process(self):
-        """检测是否有 AI CLI 进程在运行（用于兜底判断）。"""
+        """Check if any AI CLI process is running (used as fallback signal)."""
         for name in ("claude", "codex"):
             try:
                 result = subprocess.run(
@@ -157,7 +159,7 @@ class SessionDiscoverer:
         return False
 
     def _scan_codex(self):
-        """扫描 ~/.codex/sessions/ 下的活跃 JSONL。"""
+        """Scan ~/.codex/sessions/ for active JSONL files."""
         sessions = []
         if not os.path.isdir(self.codex_base):
             return sessions
@@ -194,7 +196,7 @@ class SessionDiscoverer:
         return sessions
 
     def _read_cwd_from_jsonl(self, fpath):
-        """从 Claude Code JSONL 前几行读取 cwd 字段。"""
+        """Read the cwd field from the first few lines of a Claude Code JSONL file."""
         try:
             with open(fpath, "r", encoding="utf-8") as f:
                 for _ in range(20):

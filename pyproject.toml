@@ -1,7 +1,7 @@
 [project]
 name = "vibe-brew"
 version = "0.1.0"
-description = "AI 编程等待期助手"
+description = "AI coding wait-time assistant"
 requires-python = ">=3.10"
 license = "MIT"
 

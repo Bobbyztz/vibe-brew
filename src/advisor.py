@@ -1,13 +1,14 @@
-"""建议生成模块 (advisor)
+"""Advice generation module (advisor)
 
-负责根据当前对话流状态生成等待期建议。采用双引擎策略：
-- 优先通过 subprocess 异步调用已安装的 claude CLI（注入 WaitDex 策略作为
-  in-context learning 上下文），生成个性化建议；
-- CLI 不可用或等待 CLI 返回期间，使用纯规则引擎兜底，按等待时长从预置
-  建议池中随机选取建议。
+Generates wait-time suggestions based on current session states. Uses a dual-engine
+strategy:
+- Primarily calls the installed claude CLI asynchronously via subprocess (injecting
+  WaitDex strategy as in-context learning context) to generate personalized advice;
+- When CLI is unavailable or while waiting for CLI response, falls back to a pure
+  rule engine that randomly selects from preset tip pools based on wait duration.
 
-调用限流（MIN_INTERVAL=30s）和异步轮询机制确保不阻塞主循环。
-WaitDex.md 在初始化时加载，提取其中第 3/4/9 节作为策略上下文。
+Rate limiting (MIN_INTERVAL=30s) and async polling ensure the main loop is not blocked.
+WaitDex.md is loaded at initialization, extracting sections 3/4/9 as strategy context.
 """
 
 import importlib.resources
@@ -17,32 +18,34 @@ import shutil
 import subprocess
 import time
 
+from .i18n import get_lang, get_tips, get_rule_status
+
 
 class Advisor:
-    """生成基于 WaitDex 策略的等待期建议。"""
+    """Generates WaitDex-based wait-time advice."""
 
-    MIN_INTERVAL = 30  # 最短调用间隔（秒）
+    MIN_INTERVAL = 30  # minimum call interval (seconds)
 
     def __init__(self):
         self._cli_path = shutil.which("claude")
         self._last_call_time = 0
         self._waitdex_sections = self._load_waitdex()
-        self._pending_proc = None  # 异步 CLI 子进程
+        self._pending_proc = None  # async CLI subprocess
         self._pending_start = 0
-        self._pending_sessions = []  # 发起请求时对应的 sessions
+        self._pending_sessions = []  # sessions at time of request
 
     def generate(self, sessions, force=False):
-        """根据对话流状态生成建议文本。非阻塞：CLI 异步调用，轮询收结果。"""
+        """Generate advice text based on session states. Non-blocking: CLI called async, results polled."""
         if not sessions:
             self._cancel_pending()
             return ""
 
-        # 先检查异步 CLI 是否已返回结果
+        # Check if async CLI has returned a result
         cli_result = self._poll_pending(sessions)
         if cli_result:
             return cli_result
 
-        # 如果 CLI 还在跑，不发起新请求
+        # If CLI is still running, don't start a new request
         if self._pending_proc is not None:
             return None
 
@@ -51,19 +54,19 @@ class Advisor:
             return None
 
         self._last_call_time = now
-        self._pending_sessions = sessions  # 记录本次请求的 sessions
+        self._pending_sessions = sessions  # record sessions for this request
         status_block = self._build_status(sessions)
 
-        # 优先异步 CLI 调用
+        # Prefer async CLI call
         if self._cli_path:
             self._start_cli(status_block, len(sessions))
-            # 首次立刻返回规则引擎结果作为过渡
+            # Return rule engine result immediately as a transition
             return self._rule_engine(sessions)
 
         return self._rule_engine(sessions)
 
     def _start_cli(self, status_block, n_sessions):
-        """非阻塞启动 CLI 子进程。"""
+        """Start CLI subprocess non-blocking."""
         prompt = self._build_prompt(status_block, n_sessions)
         try:
             self._pending_proc = subprocess.Popen(
@@ -77,38 +80,37 @@ class Advisor:
             self._pending_proc = None
 
     def _poll_pending(self, sessions=None):
-        """非阻塞检查子进程是否完成，返回结果或 None。
+        """Non-blocking check if subprocess is done, return result or None.
 
-        解析 CLI 输出中的「描述｜窗口N：...」行，回填到对应 session 的
-        ai_task_description 字段；剩余行作为建议文本返回。
+        Parses "desc|windowN:..." lines from CLI output, backfills them into
+        corresponding session ai_task_description fields; remaining lines
+        are returned as advice text.
         """
         if self._pending_proc is None:
             return None
 
         ret = self._pending_proc.poll()
         if ret is None:
-            # 还在跑，检查超时
+            # Still running, check timeout
             if time.time() - self._pending_start > 30:
                 self._cancel_pending()
             return None
 
-        # 子进程结束
+        # Subprocess finished
         stdout = self._pending_proc.stdout.read()
         self._pending_proc = None
         if ret != 0 or not stdout.strip():
             return None
 
-        # 解析：分离描述行和建议行
-        desc_lines = {}  # 窗口编号(1-based) -> 描述文本
+        # Parse: separate description lines from advice lines
+        desc_lines = {}  # window number (1-based) -> description text
         advice_lines = []
         for line in stdout.strip().split("\n"):
             stripped = line.strip()
-            if stripped.startswith("描述｜窗口"):
-                # "描述｜窗口1：查看并修复bug" → key=1, val="查看并修复bug"
-                rest = stripped[len("描述｜窗口"):]
-                sep = rest.find("：")
-                if sep < 0:
-                    sep = rest.find(":")
+            if stripped.startswith("desc|window"):
+                # "desc|window1: fixing a bug" -> key=1, val="fixing a bug"
+                rest = stripped[len("desc|window"):]
+                sep = rest.find(":")
                 if sep > 0:
                     try:
                         idx = int(rest[:sep])
@@ -118,7 +120,7 @@ class Advisor:
             else:
                 advice_lines.append(line)
 
-        # 回填 AI 描述到 sessions
+        # Backfill AI descriptions to sessions
         target = sessions if sessions else self._pending_sessions
         if desc_lines and target:
             for i, s in enumerate(target, 1):
@@ -128,7 +130,7 @@ class Advisor:
         return "\n".join(advice_lines).strip() or None
 
     def _cancel_pending(self):
-        """取消进行中的 CLI 调用。"""
+        """Cancel an in-progress CLI call."""
         if self._pending_proc is not None:
             try:
                 self._pending_proc.kill()
@@ -138,98 +140,108 @@ class Advisor:
             self._pending_proc = None
 
     def _build_status(self, sessions):
-        """构建当前状态文本，每个 session 带编号标签。"""
+        """Build current status text, each session with a numbered label."""
         blocks = []
         for i, s in enumerate(sessions, 1):
             wait_min = int(s.wait_seconds / 60) if s.wait_seconds else 0
-            # 阶段判断
+            # Phase determination
             if s.is_completed:
-                phase = "已完成"
+                phase = "Completed"
             elif s.has_error:
-                phase = f"出错：{s.error_message}" if s.error_message else "出错"
+                phase = f"Error: {s.error_message}" if s.error_message else "Error"
             else:
-                phase = "执行中"
+                phase = "Running"
 
             cli_name = "Claude Code" if s.cli_type == "claude" else "Codex"
-            ws = os.path.basename(s.workspace) if s.workspace else "未知"
-            task = s.task_summary or "未知任务"
-            files = ", ".join(os.path.basename(f) for f in s.files_involved[-5:]) if s.files_involved else "无"
+            ws = os.path.basename(s.workspace) if s.workspace else "unknown"
+            task = s.task_summary or "unknown task"
+            files = ", ".join(os.path.basename(f) for f in s.files_involved[-5:]) if s.files_involved else "none"
 
             block = (
-                f"【窗口{i}：{cli_name} · {ws}】\n"
-                f"- 任务：{task}\n"
-                f"- 阶段：{phase}\n"
-                f"- 已等待：{wait_min} 分钟\n"
-                f"- 涉及文件：{files}"
+                f"[Window {i}: {cli_name} \u00b7 {ws}]\n"
+                f"- Task: {task}\n"
+                f"- Phase: {phase}\n"
+                f"- Waiting: {wait_min} min\n"
+                f"- Files involved: {files}"
             )
             blocks.append(block)
         return "\n\n".join(blocks)
 
     def _build_prompt(self, status_block, n_sessions):
-        """构建完整 prompt。"""
+        """Build the complete prompt."""
         waitdex = self._waitdex_sections
+        lang = get_lang()
+
+        if lang == "zh":
+            lang_instruction = (
+                "IMPORTANT: Reply entirely in Chinese (Simplified). "
+                "Even if the task description or status contains English, "
+                "your suggestions and desc lines MUST be in Chinese.\n\n"
+            )
+            examples = (
+                "## Suggestion examples\n"
+                "- Running: \"\u00b7 \u5750\u4e86\u4e00\u4f1a\u513f\u4e86\uff0c\u8d77\u6765\u6d3b\u52a8\u6d3b\u52a8\u5427\uff01\"\n"
+                "- Completed: \"\u00b7 Trading-Burger \u5b8c\u6210\u4e86\u3002\u559d\u53e3\u6c34\uff0c\u7136\u540e\u770b\u770b diff\"\n"
+                "- Error: \"\u00b7 Trading-Burger \u9047\u5230\u4e86\u70b9\u95ee\u9898\uff0c\u4e0d\u6025\u2014\u2014\u6709\u7a7a\u518d\u770b\u770b\"\n\n"
+            )
+            bad_good = "  (\u00d7\"\u8d77\u6765\u52a8\u4e00\u52a8\" \u2192 \u25cb\"\u5750\u4e86\u4e00\u4f1a\u513f\u4e86\uff0c\u8d77\u6765\u6d3b\u52a8\u6d3b\u52a8\u5427\uff01\")\n"
+        else:
+            lang_instruction = (
+                "IMPORTANT: Reply entirely in English. "
+                "Even if the task description or status contains non-English text, "
+                "your suggestions and desc lines MUST be in English.\n\n"
+            )
+            examples = (
+                "## Suggestion examples\n"
+                "- Running: \"\u00b7 You've been at it for a while, stretch your legs!\"\n"
+                "- Completed: \"\u00b7 Trading-Burger is done. Grab some water, then check the diff\"\n"
+                "- Error: \"\u00b7 Trading-Burger hit a snag, no rush -- take a look when you're back\"\n\n"
+            )
+            bad_good = "  (\u00d7\"Stand up and move\" \u2192 \u25cb\"You've been at it for a while, stretch your legs!\")\n"
+
         common_rules = (
-            "你是一个轻松随意的等待期小助手。\n\n"
-            "## 面板结构（你必须理解这个上下文）\n"
-            "面板分上下两区：\n"
-            "- 监控区：状态图标 + CLI名 + 项目名 + 任务描述 + 状态词 + 时长\n"
-            "  任务描述已在监控区显示，建议区不需要重复\n"
-            "- 建议区：你的输出显示在这里，只负责关心建议\n\n"
-            "## 输出格式（严格遵守）\n"
-            "1. 先为每个窗口输出一行任务描述（供监控区回填），格式「描述｜窗口N：裸动作描述」\n"
-            "   裸动作描述：10 字以内，用 AI 视角（×「处理用户的bug」→ ○「排查登录异常」）\n"
-            "2. 再输出 1-3 条关心建议，格式「· 建议」\n"
-            "   建议区不需要包含项目名或任务描述，只需要关心和行动建议\n\n"
-            "## 建议示例\n"
-            "- 执行中：「· 工作有一会儿了，站起来活动活动吧」\n"
-            "- 已完成：「· Trading-Burger 搞定了。喝口水，回来看看 diff」\n"
-            "- 有报错：「· Trading-Burger 碰到点问题，不着急，回来看一眼就好」\n\n"
-            "## 建议的规则\n"
-            "- 任务描述已在监控区，建议区只需关心建议（完成/报错时可带项目名）\n"
-            "- 语气温柔体贴，像朋友关心你一样——先照顾人，再说事情\n"
-            "- 任何时候建议休息都是合理的，要有铺垫和温度\n"
-            "  （×「站起来活动一下」→ ○「工作有一会儿了，站起来活动活动吧」）\n"
-            "- 区分会话阶段：\n"
-            "  · 已完成：先关心人（喝水、活动），再顺带提 review\n"
-            "  · 有报错：温和安抚，不着急，回来看一眼就好\n"
-            "  · 执行中：不建议看具体文件（你不知道全局进度），\n"
-            "    改为身体恢复、准备下一轮、或轻量维护\n"
-            "- 根据等待时长调整：<2分钟偏身体恢复，2-10分钟偏下一轮准备，>10分钟可做轻量闭环任务\n"
+            "You are a friendly, casual wait-time assistant.\n\n"
+            + lang_instruction
+            + "## Panel structure (you must understand this context)\n"
+            "The panel has two sections:\n"
+            "- Monitor area: status icon + CLI name + project name + task description + status + duration\n"
+            "  Task description is already shown in the monitor area, no need to repeat in advice\n"
+            "- Advice area: your output goes here, focus only on caring suggestions\n\n"
+            "## Output format (follow strictly)\n"
+            "1. First output one task description line per window (for monitor area backfill), "
+            "format: \"desc|windowN: bare action description\"\n"
+            "   Bare action description: 10 words or less, from AI's perspective "
+            "(\u00d7\"handling user's bug\" \u2192 \u25cb\"debugging login issue\")\n"
+            "2. Then output 1-3 caring suggestions, format: \"\u00b7 suggestion\"\n"
+            "   Advice area should not include project name or task description, only caring and action suggestions\n\n"
+            + examples
+            + "## Suggestion rules\n"
+            "- Task description is in the monitor area, advice area only needs caring suggestions "
+            "(can mention project name for completed/error)\n"
+            "- Tone should be warm and friendly, like a friend checking in -- care for the person first, "
+            "then mention the task\n"
+            "- Suggesting rest is always valid, but add warmth and context\n"
+            + bad_good
+            + "- Differentiate by session phase:\n"
+            "  \u00b7 Completed: care for the person first (water, stretch), then mention review\n"
+            "  \u00b7 Error: gentle reassurance, no rush, just take a look when ready\n"
+            "  \u00b7 Running: don't suggest looking at specific files (you don't know overall progress),\n"
+            "    instead suggest physical recovery, preparing for next round, or light maintenance\n"
+            "- Adjust by wait duration: <2min lean toward physical recovery, 2-10min lean toward next-round prep, "
+            ">10min can do light self-contained tasks\n"
         )
         if n_sessions > 1:
-            prompt = common_rules + "用户正在同时等多个 AI 编码工具。\n"
+            prompt = common_rules + "The user is waiting on multiple AI coding tools simultaneously.\n"
         else:
-            prompt = common_rules + "用户正在等一个 AI 编码工具跑完。\n"
+            prompt = common_rules + "The user is waiting for an AI coding tool to finish.\n"
         if waitdex:
             prompt += f"\n{waitdex}\n"
-        prompt += f"\n当前状态：\n{status_block}"
+        prompt += f"\nCurrent status:\n{status_block}"
         return prompt
 
-    # WaitDex 风格的体贴建议池——语气温柔，像朋友随口一提
-    _TIPS_SHORT = [  # < 2 分钟：身体重置
-        "工作有一会儿了，站起来活动活动吧",
-        "趁这会儿喝口水，放松一下肩颈",
-        "抬头看看远处，让眼睛歇一歇",
-        "深呼吸几次，等它跑完咱再看",
-        "伸个懒腰，转转脖子，马上就好",
-    ]
-    _TIPS_MEDIUM = [  # 2-10 分钟：下一轮准备 + 轻维护
-        "趁还在跑，想想结果出来先看哪两个文件",
-        "去接杯水，回来顺手草拟下一条 prompt",
-        "起来走走，回来整理一下 TODO 或临时笔记",
-        "列几条验收要点，等会儿对着查就不慌了",
-        "还要一会儿呢，站起来活动活动再回来",
-    ]
-    _TIPS_LONG = [  # > 10 分钟：轻量闭环
-        "还早呢，去喝口水看看远方，回来再说",
-        "这轮要跑一阵子，回条消息或补一小段文档吧",
-        "趁这段空档清理一下浏览器标签，轻松一下",
-        "去走动走动，回来整理下 issue 或笔记",
-        "读一篇短文章放松放松，它跑完会等你的",
-    ]
-
     def _rule_engine(self, sessions):
-        """纯规则引擎兜底，任务描述已在监控区，建议区只输出关心建议。"""
+        """Pure rule engine fallback. Task description is in monitor area,
+        advice area only outputs caring suggestions."""
         lines = []
         has_active = False
 
@@ -240,44 +252,44 @@ class Advisor:
 
             if s.is_completed:
                 if recent_file:
-                    lines.append(f"{ws} 搞定了。喝口水，回来看看 {recent_file} 的 diff")
+                    lines.append(get_rule_status("done_with_file", ws=ws, f=recent_file))
                 else:
-                    lines.append(f"{ws} 搞定了。起来活动一下，回来跑跑测试就好")
+                    lines.append(get_rule_status("done_no_file", ws=ws))
             elif s.has_error:
-                lines.append(f"{ws} 碰到点问题，不着急，回来看一眼就好")
+                lines.append(get_rule_status("error", ws=ws))
             elif wait_min >= 5 and self._is_stale(s):
-                lines.append(f"{ws} 好像卡住了，去终端瞅一眼吧")
+                lines.append(get_rule_status("stale", ws=ws))
             else:
                 has_active = True
 
-        # 对执行中的会话，从建议池选一条关心建议
+        # For active sessions, pick a caring tip from the pool
         if has_active and len(lines) < 3:
             max_wait = max(
                 (int(s.wait_seconds / 60) if s.wait_seconds else 0)
                 for s in sessions if not s.is_completed and not s.has_error
             )
             if max_wait < 2:
-                pool = self._TIPS_SHORT
+                pool = get_tips("short")
             elif max_wait <= 10:
-                pool = self._TIPS_MEDIUM
+                pool = get_tips("medium")
             else:
-                pool = self._TIPS_LONG
+                pool = get_tips("long")
             tip = random.choice(pool)
             if tip not in lines:
                 lines.append(tip)
 
-        # 去重，最多 3 条
+        # Deduplicate, max 3 items
         seen = []
-        for t in lines:
-            if t not in seen:
-                seen.append(t)
+        for item in lines:
+            if item not in seen:
+                seen.append(item)
             if len(seen) >= 3:
                 break
 
-        return "\n".join(f"· {t}" for t in seen)
+        return "\n".join(f"\u00b7 {item}" for item in seen)
 
     def _is_stale(self, session):
-        """检查文件是否 5 分钟无更新（已完成的会话不算卡住）。"""
+        """Check if file hasn't been updated in 5 minutes (completed sessions don't count as stale)."""
         if session.is_completed:
             return False
         try:
@@ -287,9 +299,10 @@ class Advisor:
             return False
 
     def _load_waitdex(self):
-        """从 WaitDex.md 提取 ## 3. / ## 4. / ## 9. 开头的 section。"""
+        """Extract sections starting with ## 3. / ## 4. / ## 9. from WaitDex.md."""
+        filename = "WaitDex.md" if get_lang() == "zh" else "WaitDex_en.md"
         try:
-            ref = importlib.resources.files("src").joinpath("WaitDex.md")
+            ref = importlib.resources.files("src").joinpath(filename)
             content = ref.read_text(encoding="utf-8")
         except (OSError, FileNotFoundError, ModuleNotFoundError):
             return ""
