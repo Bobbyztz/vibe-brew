@@ -1,4 +1,11 @@
-"""状态变化检测器：对比前后轮次，检测对话流状态变化。"""
+"""状态变化检测模块 (state_detector)
+
+负责对比相邻两轮轮询之间的对话流状态，检测出有意义的变化事件：
+新会话出现、会话完成、新报错、动作切换、长时间无变化（stale）。
+
+检测结果封装在 Changes 对象中，供主循环判断是否需要强制刷新建议。
+同时提供 snapshot() 方法生成当前轮次的状态快照，作为下一轮对比基准。
+"""
 
 import os
 import time
@@ -54,13 +61,14 @@ class StateDetector:
             if s.current_action and s.current_action != prev.get("current_action", ""):
                 changes.action_changed.append(s.session_id)
 
-            # 长时间无变化
-            try:
-                mtime = os.path.getmtime(s.file_path)
-                if now - mtime > self.STALE_THRESHOLD:
-                    changes.stale.append(s.session_id)
-            except OSError:
-                pass
+            # 长时间无变化（已完成的会话不算 stale）
+            if not s.is_completed:
+                try:
+                    mtime = os.path.getmtime(s.file_path)
+                    if now - mtime > self.STALE_THRESHOLD:
+                        changes.stale.append(s.session_id)
+                except OSError:
+                    pass
 
         return changes
 

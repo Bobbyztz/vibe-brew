@@ -1,0 +1,19 @@
+[project]
+name = "vibe-brew"
+version = "0.1.0"
+description = "AI 编程等待期助手"
+requires-python = ">=3.10"
+license = "MIT"
+
+[project.scripts]
+vibe-brew = "src.vibe_brew:main"
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["src*"]
+
+[tool.setuptools.package-data]
+"*" = ["*.md"]

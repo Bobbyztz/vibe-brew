@@ -19,7 +19,7 @@ vibe-brew 是一个 toy，不是严肃的生产力工具。它的输出必须让
 
 ## 当前阶段
 
-Phase 0 — CLI Demo：`src/` 下按模块组织，`python src/vibe_brew.py` 为唯一入口。
+Phase 0 — CLI Demo：`src/` 为 Python package，`vibe-brew` 命令为唯一入口。
 
 ## 文档结构
 
@@ -35,7 +35,8 @@ Phase 0 — CLI Demo：`src/` 下按模块组织，`python src/vibe_brew.py` 为
 - 语言：Python 3.10+
 - macOS only（Phase 0-1），跨平台支持计划在 Phase 3+
 - 零外部依赖（仅标准库），AI 建议生成通过 `subprocess` 调用已安装的 AI CLI
-- `src/` 不是 Python package，无需 `__init__.py`，模块间使用同目录直接 import（如 `from session_discoverer import SessionDiscoverer`）
+- `src/` 是 Python package，模块间使用相对 import（如 `from .session_discoverer import SessionDiscoverer`）
+- 安装方式：`pipx install git+https://github.com/johnlui/vibe-brew.git` 或本地开发 `uv pip install -e .`
 - 所有文件 I/O 统一使用 `encoding='utf-8'`
 - 建议生成仅发送对话状态摘要（非原始代码），CLI 不可用时纯规则引擎本地运行
 - AI CLI 调用使用 `--no-session-persistence` 确保不写入 JSONL 会话文件（阅后即焚），避免被自身 session discovery 发现
