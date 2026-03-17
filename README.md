@@ -32,7 +32,7 @@ vibe-brew is an AI coding wait-time assistant. It monitors your active AI coding
   · Codex is done, take a quick look at routes.py
 ```
 
-## Quick Start
+## Installation
 
 **Prerequisites**
 
@@ -40,29 +40,27 @@ vibe-brew is an AI coding wait-time assistant. It monitors your active AI coding
 - Python 3.10+
 - Claude Code or Codex CLI installed with an active subscription (vibe-brew calls the CLI directly to generate advice — no API key needed)
 
-```bash
-# Recommended: install via pipx (isolated environment)
-pipx install git+https://github.com/Bobbyztz/vibe-brew.git
+**For users** — install and use from anywhere:
 
-# Or via uv
+```bash
 uv tool install git+https://github.com/Bobbyztz/vibe-brew.git
 ```
 
-After installation, just run:
-
-```bash
-vibe-brew
-```
-
-**Local Development**
+**For developers** — clone first, then install in editable mode:
 
 ```bash
 git clone https://github.com/Bobbyztz/vibe-brew.git
 cd vibe-brew
-uv venv && uv pip install -e .
-source .venv/bin/activate
+uv tool install -e .
+```
+
+Both paths give you a global `vibe-brew` command. After installation, run from any directory:
+
+```bash
 vibe-brew
 ```
+
+The developer install (`-e`) means code changes take effect immediately — no reinstall needed.
 
 ## How It Works
 
