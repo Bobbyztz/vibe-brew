@@ -84,7 +84,7 @@ class Renderer:
 
                 task = s.ai_task_description or s.task_summary or ""
                 task_part = f" \u00b7 {task}" if task else ""
-                header = f" {icon} {cli_name} \u00b7 {ws_short}{task_part}"
+                header = f" {icon} {ws_short} \u00b7 {cli_name}{task_part}"
                 header_line = self._pad_line(header, cols)
                 lines.append("\u2551" + header_line + "\u2551")
 
@@ -113,15 +113,28 @@ class Renderer:
         lines.append("\u2551" + " " * (cols - 2) + "\u2551")
 
         # Advice area (supports wrapping, blank line between items for breathing room)
-        if advice:
+        # Reserve 3 lines for: bottom padding + footer + safety margin
+        try:
+            rows = os.get_terminal_size().lines
+        except OSError:
+            rows = 24
+        advice_budget = rows - len(lines) - 3
+
+        if advice and advice_budget > 0:
             advice_lines = advice.split("\n")
             for i, aline in enumerate(advice_lines):
                 content = f" {aline}"
                 for wl in self._wrap_lines(content, cols, indent=3, max_lines=2):
+                    if advice_budget <= 0:
+                        break
                     padded = self._pad_line(wl, cols)
                     lines.append("\u2551" + padded + "\u2551")
+                    advice_budget -= 1
+                if advice_budget <= 0:
+                    break
                 if i < len(advice_lines) - 1:
                     lines.append("\u2551" + " " * (cols - 2) + "\u2551")
+                    advice_budget -= 1
         else:
             hint = " " + t("generating")
             lines.append("\u2551" + self._pad_line(hint, cols) + "\u2551")
@@ -135,10 +148,6 @@ class Renderer:
         output = "\033[H"  # cursor home
         output += "\n".join(lines)
         # Clear remaining lines
-        try:
-            rows = os.get_terminal_size().lines
-        except OSError:
-            rows = 24
         remaining = rows - len(lines)
         if remaining > 0:
             output += "\n" + "\033[K\n" * remaining
@@ -185,7 +194,7 @@ class Renderer:
         best_break_w = 0
         w = 0
         for i, ch in enumerate(text):
-            cw = 2 if ord(ch) > 0x7F else 1
+            cw = 2 if self._is_wide(ch) else 1
             w += cw
             if ch in self._BREAK_AFTER:
                 best_break = i + 1
@@ -221,7 +230,7 @@ class Renderer:
             result = []
             w = 0
             for ch in text:
-                cw = 2 if ord(ch) > 0x7F else 1
+                cw = 2 if self._is_wide(ch) else 1
                 if w + cw > target - 1:  # reserve 1 col for ellipsis
                     result.append("\u2026")
                     break
@@ -232,14 +241,36 @@ class Renderer:
             return truncated + " " * max(pad, 0)
         return text
 
+    @staticmethod
+    def _is_wide(ch):
+        """Check if a character is wide (occupies 2 terminal columns).
+
+        Covers CJK Unified Ideographs, fullwidth forms, and other East Asian
+        wide characters.  Everything else (including box-drawing, arrows,
+        mathematical symbols, Latin extended, etc.) is treated as narrow (1 col).
+        """
+        cp = ord(ch)
+        return (
+            0x1100 <= cp <= 0x115F      # Hangul Jamo
+            or 0x2E80 <= cp <= 0x303E   # CJK Radicals, Kangxi, CJK Symbols
+            or 0x3040 <= cp <= 0x33BF   # Hiragana, Katakana, CJK Compat
+            or 0x3400 <= cp <= 0x4DBF   # CJK Unified Ext A
+            or 0x4E00 <= cp <= 0x9FFF   # CJK Unified Ideographs
+            or 0xA000 <= cp <= 0xA4CF   # Yi
+            or 0xAC00 <= cp <= 0xD7AF   # Hangul Syllables
+            or 0xF900 <= cp <= 0xFAFF   # CJK Compat Ideographs
+            or 0xFE30 <= cp <= 0xFE6F   # CJK Compat Forms
+            or 0xFF01 <= cp <= 0xFF60   # Fullwidth Forms
+            or 0xFFE0 <= cp <= 0xFFE6   # Fullwidth Signs
+            or 0x20000 <= cp <= 0x2FA1F # CJK Ext B–F, Compat Supplement
+            or 0x30000 <= cp <= 0x3134F # CJK Ext G–I
+        )
+
     def _display_width(self, text):
-        """Roughly calculate display width (CJK characters take 2 columns)."""
+        """Calculate display width (wide characters take 2 columns)."""
         w = 0
         for ch in text:
-            if ord(ch) > 0x7F:
-                w += 2
-            else:
-                w += 1
+            w += 2 if self._is_wide(ch) else 1
         return w
 
 
@@ -308,9 +339,10 @@ def main():
 
             # 4. Call generate() every cycle: internally non-blocking, self-manages rate limiting and async CLI
             if sessions:
-                force = changes.has_significant_change()
-                # Only clear old advice on real state transitions (new session/completed/error)
-                # Tool switches (action_changed) are too frequent, don't clear
+                # Only force-refresh on real state transitions; tool switches
+                # (action_changed) are too frequent and would bypass the 30s cooldown
+                force = bool(changes.new_sessions or changes.completed
+                             or changes.errors or changes.stale)
                 if changes.new_sessions or changes.completed or changes.errors:
                     last_advice = ""
                 result = advisor.generate(sessions, force=force)

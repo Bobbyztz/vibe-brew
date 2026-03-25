@@ -33,6 +33,8 @@ class Advisor:
         self._pending_proc = None  # async CLI subprocess
         self._pending_start = 0
         self._pending_sessions = []  # sessions at time of request
+        self._tip_bags = {}  # duration -> remaining shuffled tips
+        self._last_tip = {}  # duration -> last drawn tip (for boundary dedup)
 
     def generate(self, sessions, force=False):
         """Generate advice text based on session states. Non-blocking: CLI called async, results polled."""
@@ -117,7 +119,16 @@ class Advisor:
                         desc_lines[idx] = rest[sep + 1:].strip()
                     except ValueError:
                         pass
-            else:
+            elif stripped and not all(c in "-=_*#" for c in stripped):
+                # Skip empty lines, pure formatting lines (---, ===, etc.),
+                # and echoed status block lines (CLI sometimes echoes the input)
+                if stripped.startswith("[Window ") and ":" in stripped:
+                    continue
+                if stripped.startswith("- ") and any(
+                    stripped.startswith(p)
+                    for p in ("- Task:", "- Phase:", "- Waiting:", "- Files involved:")
+                ):
+                    continue
                 advice_lines.append(line)
 
         # Backfill AI descriptions to sessions
@@ -158,7 +169,7 @@ class Advisor:
             files = ", ".join(os.path.basename(f) for f in s.files_involved[-5:]) if s.files_involved else "none"
 
             block = (
-                f"[Window {i}: {cli_name} \u00b7 {ws}]\n"
+                f"[Window {i}: {ws} \u00b7 {cli_name}]\n"
                 f"- Task: {task}\n"
                 f"- Phase: {phase}\n"
                 f"- Waiting: {wait_min} min\n"
@@ -244,6 +255,7 @@ class Advisor:
         advice area only outputs caring suggestions."""
         lines = []
         has_active = False
+        status_index = 0  # increments per status line for template diversity
 
         for s in sessions:
             ws = os.path.basename(s.workspace) if s.workspace else ""
@@ -252,29 +264,32 @@ class Advisor:
 
             if s.is_completed:
                 if recent_file:
-                    lines.append(get_rule_status("done_with_file", ws=ws, f=recent_file))
+                    lines.append(get_rule_status("done_with_file", index=status_index, ws=ws, f=recent_file))
                 else:
-                    lines.append(get_rule_status("done_no_file", ws=ws))
+                    lines.append(get_rule_status("done_no_file", index=status_index, ws=ws))
+                status_index += 1
             elif s.has_error:
-                lines.append(get_rule_status("error", ws=ws))
+                lines.append(get_rule_status("error", index=status_index, ws=ws))
+                status_index += 1
             elif wait_min >= 5 and self._is_stale(s):
-                lines.append(get_rule_status("stale", ws=ws))
+                lines.append(get_rule_status("stale", index=status_index, ws=ws))
+                status_index += 1
             else:
                 has_active = True
 
-        # For active sessions, pick a caring tip from the pool
+        # For active sessions, pick a caring tip via shuffle bag
         if has_active and len(lines) < 3:
             max_wait = max(
                 (int(s.wait_seconds / 60) if s.wait_seconds else 0)
                 for s in sessions if not s.is_completed and not s.has_error
             )
             if max_wait < 2:
-                pool = get_tips("short")
+                duration = "short"
             elif max_wait <= 10:
-                pool = get_tips("medium")
+                duration = "medium"
             else:
-                pool = get_tips("long")
-            tip = random.choice(pool)
+                duration = "long"
+            tip = self._draw_tip(duration)
             if tip not in lines:
                 lines.append(tip)
 
@@ -287,6 +302,26 @@ class Advisor:
                 break
 
         return "\n".join(f"\u00b7 {item}" for item in seen)
+
+    def _draw_tip(self, duration):
+        """Draw a tip from the shuffle bag for the given duration bucket.
+
+        Exhausts all tips before reshuffling. On reshuffle, ensures the first
+        draw differs from the last draw of the previous round.
+        """
+        bag = self._tip_bags.get(duration)
+        if not bag:
+            pool = list(get_tips(duration))
+            random.shuffle(pool)
+            # Avoid boundary repeat: if last item to be popped equals previous draw, rotate
+            prev = self._last_tip.get(duration)
+            if prev and len(pool) > 1 and pool[-1] == prev:
+                pool.insert(0, pool.pop())
+            self._tip_bags[duration] = pool
+            bag = self._tip_bags[duration]
+        tip = bag.pop()
+        self._last_tip[duration] = tip
+        return tip
 
     def _is_stale(self, session):
         """Check if file hasn't been updated in 5 minutes (completed sessions don't count as stale)."""

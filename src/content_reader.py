@@ -130,6 +130,11 @@ class ContentReader:
                 except json.JSONDecodeError:
                     continue
 
+        # For codex parents with subagents: only mark completed when all subagents are also done
+        if session.is_completed and session.subagent_files:
+            if not self._all_subagents_completed(session.subagent_files):
+                session.is_completed = False
+
         # Calculate wait duration
         if session.last_user_time:
             session.wait_seconds = time.time() - session.last_user_time
@@ -172,6 +177,34 @@ class ContentReader:
         if content:
             return content
         return ""
+
+    def _all_subagents_completed(self, subagent_files):
+        """Check whether every subagent session has a task_complete event."""
+        for fpath in subagent_files:
+            if not self._file_has_task_complete(fpath):
+                return False
+        return True
+
+    def _file_has_task_complete(self, fpath):
+        """Scan last few lines of a JSONL file for a task_complete event."""
+        try:
+            with open(fpath, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+        except OSError:
+            return False
+        # Check last 5 lines (task_complete is typically at the end)
+        for line in reversed(lines[-5:]):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+                if (rec.get("type") == "event_msg"
+                        and rec.get("payload", {}).get("type") == "task_complete"):
+                    return True
+            except json.JSONDecodeError:
+                continue
+        return False
 
     def _parse_claude_lines(self, session, lines):
         """Parse Claude Code JSONL lines."""

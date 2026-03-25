@@ -28,20 +28,23 @@ class TerminalRenamer:
             return
         self._last_run = now
 
-        if not sessions:
-            return
-
-        # workspace path -> project basename
+        # workspace path -> project basename (only sessions with live CLI processes)
         ws_names = {}
-        for s in sessions:
-            if s.workspace:
-                ws_names[s.workspace] = os.path.basename(s.workspace)
+        if sessions:
+            for s in sessions:
+                if s.workspace and s.has_live_process:
+                    ws_names[s.workspace] = os.path.basename(s.workspace)
 
-        if not ws_names:
-            return
+        # Active project names that SHOULD be pinned right now
+        active_names = set(ws_names.values())
 
-        self._rename_ghostty(ws_names)
-        self._rename_terminal_app(ws_names)
+        # Unpin stale tabs, then pin active ones (both run every cycle)
+        self._cleanup_ghostty(active_names)
+        self._cleanup_terminal_app(active_names)
+
+        if ws_names:
+            self._rename_ghostty(ws_names)
+            self._rename_terminal_app(ws_names)
 
     def _rename_ghostty(self, ws_names):
         """Ghostty: pin tab title via perform action "set_tab_title:...".
@@ -132,6 +135,87 @@ class TerminalRenamer:
                     f"set custom title of tab {tab_idx} of window {win_idx} "
                     f'to "{safe_name}"'
                 )
+
+    def _cleanup_ghostty(self, active_names):
+        """Ghostty: unpin any tab whose title was set by us but no longer matches
+        an active session. Uses a negative check — if a tab title is NOT a known
+        Ghostty/shell default AND NOT in active_names, it was likely pinned by us
+        and should be unpinned.
+
+        We identify our pinned tabs by: title does not contain "Claude Code",
+        "Codex", or common shell defaults (zsh/bash/~), AND is not in active_names.
+        To be safe, only unpin tabs whose cwd no longer has a running AI CLI
+        (i.e., the cwd doesn't match any active workspace).
+        """
+        if not self._is_app_running("Ghostty"):
+            return
+
+        # Build a whitelist of titles we should NOT unpin
+        keep_conditions = [
+            'tname contains "Claude Code"',
+            'tname contains "Codex"',
+        ]
+        for name in active_names:
+            safe_name = name.replace("\\", "\\\\").replace('"', '\\"')
+            keep_conditions.append(f'tname is "{safe_name}"')
+
+        keep_check = " or ".join(keep_conditions)
+
+        # For tabs NOT in the whitelist: check if they look like a pinned
+        # project name (short, no path separators) and unpin them.
+        # The "tname does not contain /" heuristic avoids touching tabs with
+        # shell-generated titles like "/Users/foo" or "~/projects".
+        script = (
+            'tell application "Ghostty"\n'
+            "    repeat with win in windows\n"
+            "        repeat with t in tabs of win\n"
+            "            try\n"
+            "                set tname to name of t\n"
+            f'                if not ({keep_check}) and tname does not contain "/" and tname does not contain "~" then\n'
+            "                    set term to focused terminal of t\n"
+            '                    perform action "set_tab_title:" on term\n'
+            "                end if\n"
+            "            end try\n"
+            "        end repeat\n"
+            "    end repeat\n"
+            "end tell"
+        )
+        self._run_osascript(script)
+
+    def _cleanup_terminal_app(self, active_names):
+        """Terminal.app: clear custom title for tabs we previously renamed
+        but that no longer match an active session."""
+        if not self._is_app_running("Terminal"):
+            return
+
+        keep_conditions = []
+        for name in active_names:
+            safe_name = name.replace("\\", "\\\\").replace('"', '\\"')
+            keep_conditions.append(f'tname is "{safe_name}"')
+
+        # Only act on tabs that have a non-empty custom title not in active_names
+        if keep_conditions:
+            keep_check = " or ".join(keep_conditions)
+            skip_condition = f'if tname is "" or ({keep_check}) then\n                    -- keep\n                else'
+        else:
+            skip_condition = 'if tname is "" then\n                    -- keep\n                else'
+
+        script = (
+            'tell application "Terminal"\n'
+            "    repeat with w from 1 to count of windows\n"
+            "        repeat with t from 1 to count of tabs of window w\n"
+            "            try\n"
+            "                set tname to custom title of tab t of window w\n"
+            f"                {skip_condition}\n"
+            '                    set custom title of tab t of window w to ""\n'
+            "                    set title displays custom title of tab t of window w to false\n"
+            "                end if\n"
+            "            end try\n"
+            "        end repeat\n"
+            "    end repeat\n"
+            "end tell"
+        )
+        self._run_osascript(script)
 
     def _get_tty_cwd(self, tty):
         """Get the working directory of processes on a tty via lsof."""

@@ -36,6 +36,8 @@ class Session:
         self.recent_messages = []      # recent conversation messages [{"role": "user"/"assistant", "text": "..."}]
         self.task_summary = ""         # high-level description of current task (from user's latest message)
         self.ai_task_description = ""  # AI-generated perspective-shifted description (overrides templates)
+        self.has_live_process = False  # whether a live CLI process owns this session
+        self.subagent_files = []      # file paths of child subagent sessions (codex)
 
 
 class SessionDiscoverer:
@@ -134,7 +136,9 @@ class SessionDiscoverer:
                     # Process still alive (terminal open), take the latest N regardless of mtime
                     n = instance_counts[real_workspace]
                     for _, fpath, workspace, session_id in candidates[:n]:
-                        sessions.append(Session(fpath, "claude", workspace, session_id))
+                        s = Session(fpath, "claude", workspace, session_id)
+                        s.has_live_process = True
+                        sessions.append(s)
                 else:
                     # Process exited, only keep recent files for brief display
                     for mtime, fpath, workspace, session_id in candidates[:1]:
@@ -159,12 +163,18 @@ class SessionDiscoverer:
         return False
 
     def _scan_codex(self):
-        """Scan ~/.codex/sessions/ for active JSONL files."""
-        sessions = []
+        """Scan ~/.codex/sessions/ for active JSONL files.
+
+        Subagent sessions (source.subagent in session_meta) are filtered out
+        and their file paths attached to the parent session for completion tracking.
+        """
         if not os.path.isdir(self.codex_base):
-            return sessions
+            return []
 
         now = time.time()
+        # First pass: classify files into parents and subagents
+        parents = {}      # session_id -> (fpath, workspace, mtime)
+        subagents = {}    # parent_thread_id -> [fpath, ...]
         try:
             for root, _dirs, files in os.walk(self.codex_base):
                 for fname in files:
@@ -177,22 +187,41 @@ class SessionDiscoverer:
 
                     session_id = fname[:-6]
                     workspace = ""
+                    is_subagent = False
+                    parent_id = ""
                     try:
                         with open(fpath, "r", encoding="utf-8") as f:
                             first_line = f.readline().strip()
                             if first_line:
                                 rec = json.loads(first_line)
                                 if rec.get("type") == "session_meta":
-                                    workspace = rec.get("payload", {}).get("cwd", "")
-                                    sid = rec.get("payload", {}).get("id", "")
+                                    payload = rec.get("payload", {})
+                                    workspace = payload.get("cwd", "")
+                                    sid = payload.get("id", "")
                                     if sid:
                                         session_id = sid
+                                    source = payload.get("source", "")
+                                    if isinstance(source, dict) and "subagent" in source:
+                                        is_subagent = True
+                                        parent_id = source["subagent"].get(
+                                            "thread_spawn", {}
+                                        ).get("parent_thread_id", "")
                     except (json.JSONDecodeError, OSError):
                         pass
 
-                    sessions.append(Session(fpath, "codex", workspace, session_id))
+                    if is_subagent and parent_id:
+                        subagents.setdefault(parent_id, []).append(fpath)
+                    else:
+                        parents[session_id] = (fpath, workspace, mtime)
         except OSError:
             pass
+
+        # Second pass: build parent Sessions with subagent file lists
+        sessions = []
+        for session_id, (fpath, workspace, _mtime) in parents.items():
+            s = Session(fpath, "codex", workspace, session_id)
+            s.subagent_files = subagents.get(session_id, [])
+            sessions.append(s)
         return sessions
 
     def _read_cwd_from_jsonl(self, fpath):

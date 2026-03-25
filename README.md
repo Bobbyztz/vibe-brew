@@ -22,7 +22,8 @@ vibe-brew is an AI coding wait-time assistant. It monitors your active AI coding
 ╚═══════════════════════════════════════════╝
 
   ⟳ Claude Code  ~/my-project  4m32s
-    Refactoring auth module, changed 3 files, running tests
+    Refactoring auth module, changed 3 files, 
+    running tests
 
   ● Codex  ~/api-server  0m45s
     Done, waiting for your review

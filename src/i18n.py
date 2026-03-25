@@ -87,16 +87,52 @@ _TIPS = {
     },
 }
 
-# Rule-engine status phrases
+# Rule-engine status phrases (lists for diversity — pick by session index)
 _RULE_STATUS = {
-    "done_with_file":  {"en": "{ws} is done. Grab some water, then check the {f} diff",
-                        "zh": "{ws} \u5b8c\u6210\u4e86\u3002\u559d\u53e3\u6c34\uff0c\u7136\u540e\u770b\u770b {f} \u7684 diff"},
-    "done_no_file":    {"en": "{ws} is done. Stretch a bit, then run the tests",
-                        "zh": "{ws} \u5b8c\u6210\u4e86\u3002\u4f38\u4f38\u61d2\u8170\uff0c\u7136\u540e\u8dd1\u4e0b\u6d4b\u8bd5"},
-    "error":           {"en": "{ws} hit a snag, no rush -- take a look when you're ready",
-                        "zh": "{ws} \u9047\u5230\u4e86\u70b9\u95ee\u9898\uff0c\u4e0d\u6025\u2014\u2014\u6709\u7a7a\u518d\u770b\u770b"},
-    "stale":           {"en": "{ws} seems stuck -- check the terminal when you get a chance",
-                        "zh": "{ws} \u597d\u50cf\u5361\u4f4f\u4e86\u2014\u2014\u6709\u7a7a\u770b\u770b\u7ec8\u7aef"},
+    "done_with_file": {
+        "en": [
+            "{ws} is done. Grab some water, then check the {f} diff",
+            "{ws} finished. Stretch your legs, then review {f}",
+            "{ws} wrapped up. Roll your neck, then glance at {f}",
+        ],
+        "zh": [
+            "{ws} \u5b8c\u6210\u4e86\u3002\u559d\u53e3\u6c34\uff0c\u7136\u540e\u770b\u770b {f} \u7684 diff",
+            "{ws} \u8dd1\u5b8c\u4e86\u3002\u4f38\u4f38\u61d2\u8170\uff0c\u7136\u540e\u7785\u4e00\u773c {f}",
+            "{ws} \u641e\u5b9a\u4e86\u3002\u8f6c\u8f6c\u8116\u5b50\uff0c\u7136\u540e\u68c0\u67e5\u4e00\u4e0b {f}",
+        ],
+    },
+    "done_no_file": {
+        "en": [
+            "{ws} is done. Stretch a bit, then run the tests",
+            "{ws} finished. Grab some water, then check the output",
+            "{ws} wrapped up. Take a breath, then review the changes",
+        ],
+        "zh": [
+            "{ws} \u5b8c\u6210\u4e86\u3002\u4f38\u4f38\u61d2\u8170\uff0c\u7136\u540e\u8dd1\u4e0b\u6d4b\u8bd5",
+            "{ws} \u8dd1\u5b8c\u4e86\u3002\u559d\u53e3\u6c34\uff0c\u7136\u540e\u770b\u770b\u8f93\u51fa",
+            "{ws} \u641e\u5b9a\u4e86\u3002\u6df1\u547c\u5438\uff0c\u7136\u540e review \u4e00\u4e0b\u6539\u52a8",
+        ],
+    },
+    "error": {
+        "en": [
+            "{ws} hit a snag, no rush -- take a look when you're ready",
+            "{ws} ran into something -- stretch first, then check it out",
+            "{ws} needs attention -- grab some water and take a look",
+        ],
+        "zh": [
+            "{ws} \u9047\u5230\u4e86\u70b9\u95ee\u9898\uff0c\u4e0d\u6025\u2014\u2014\u6709\u7a7a\u518d\u770b\u770b",
+            "{ws} \u78b0\u5230\u70b9\u72b6\u51b5\u2014\u2014\u5148\u6d3b\u52a8\u6d3b\u52a8\uff0c\u518d\u53bb\u770b\u770b",
+            "{ws} \u9700\u8981\u6ce8\u610f\u4e00\u4e0b\u2014\u2014\u559d\u53e3\u6c34\uff0c\u7136\u540e\u7785\u7785",
+        ],
+    },
+    "stale": {
+        "en": [
+            "{ws} seems stuck -- check the terminal when you get a chance",
+        ],
+        "zh": [
+            "{ws} \u597d\u50cf\u5361\u4f4f\u4e86\u2014\u2014\u6709\u7a7a\u770b\u770b\u7ec8\u7aef",
+        ],
+    },
 }
 
 
@@ -204,8 +240,15 @@ def get_tips(duration):
     return lang_tips.get(duration, lang_tips["short"])
 
 
-def get_rule_status(key, **kwargs):
-    """Return a formatted rule-engine status string."""
+def get_rule_status(key, index=0, **kwargs):
+    """Return a formatted rule-engine status string.
+
+    index selects which template variant to use, so different sessions
+    get different action suggestions even when they share the same status.
+    """
     entry = _RULE_STATUS.get(key, {})
-    template = entry.get(_current_lang, entry.get("en", ""))
+    templates = entry.get(_current_lang, entry.get("en", []))
+    if not templates:
+        return ""
+    template = templates[index % len(templates)]
     return template.format(**kwargs)
