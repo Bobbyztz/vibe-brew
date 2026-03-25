@@ -251,7 +251,8 @@ class Renderer:
         """
         cp = ord(ch)
         return (
-            0x1100 <= cp <= 0x115F      # Hangul Jamo
+            cp in (0x2014, 0x2015, 0x2018, 0x2019, 0x201C, 0x201D, 0x2026)  # Ambiguous-width chars wide in CJK terminals: dashes, quotes, ellipsis
+            or 0x1100 <= cp <= 0x115F   # Hangul Jamo
             or 0x2E80 <= cp <= 0x303E   # CJK Radicals, Kangxi, CJK Symbols
             or 0x3040 <= cp <= 0x33BF   # Hiragana, Katakana, CJK Compat
             or 0x3400 <= cp <= 0x4DBF   # CJK Unified Ext A

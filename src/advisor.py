@@ -81,10 +81,53 @@ class Advisor:
         except (FileNotFoundError, OSError):
             self._pending_proc = None
 
+    def _build_session_labels(self, sessions):
+        """Build smart display labels for sessions.
+
+        - If a project is unique among all sessions: just project name
+        - If same project has multiple agents of different CLI types:
+          "project (CLI name)"
+        - If same project has multiple agents of the same CLI type:
+          "project (CLI name #N)"
+        """
+        labels = []
+        ws_names = [os.path.basename(s.workspace) if s.workspace else "?" for s in sessions]
+
+        # Count occurrences of each workspace name
+        ws_count = {}
+        for ws in ws_names:
+            ws_count[ws] = ws_count.get(ws, 0) + 1
+
+        # For duplicated workspaces, check if CLI types disambiguate
+        # key: (ws, cli_type) -> count
+        ws_cli_count = {}
+        for s, ws in zip(sessions, ws_names):
+            key = (ws, s.cli_type)
+            ws_cli_count[key] = ws_cli_count.get(key, 0) + 1
+
+        # Track per-(ws, cli_type) index for numbering
+        ws_cli_seen = {}
+        for s, ws in zip(sessions, ws_names):
+            cli_name = "Claude Code" if s.cli_type == "claude" else "Codex"
+            if ws_count[ws] <= 1:
+                # Unique project
+                labels.append(ws)
+            else:
+                key = (ws, s.cli_type)
+                if ws_cli_count[key] <= 1:
+                    # Different CLI types disambiguate
+                    labels.append(f"{ws} ({cli_name})")
+                else:
+                    # Same project + same CLI type, need numbering
+                    ws_cli_seen[key] = ws_cli_seen.get(key, 0) + 1
+                    labels.append(f"{ws} ({cli_name} #{ws_cli_seen[key]})")
+
+        return labels
+
     def _poll_pending(self, sessions=None):
         """Non-blocking check if subprocess is done, return result or None.
 
-        Parses "desc|windowN:..." lines from CLI output, backfills them into
+        Parses "desc|<label>:..." lines from CLI output, backfills them into
         corresponding session ai_task_description fields; remaining lines
         are returned as advice text.
         """
@@ -104,26 +147,38 @@ class Advisor:
         if ret != 0 or not stdout.strip():
             return None
 
+        # Build label lookup for backfilling descriptions
+        target = sessions if sessions else self._pending_sessions
+        label_to_idx = {}  # label (lowercase) -> session index (0-based)
+        label_set = set()   # known labels for filtering echoed headers
+        if target:
+            labels = self._build_session_labels(target)
+            for i, lbl in enumerate(labels):
+                label_to_idx[lbl.lower()] = i
+                label_set.add(lbl.lower())
+
         # Parse: separate description lines from advice lines
-        desc_lines = {}  # window number (1-based) -> description text
+        desc_map = {}  # session index (0-based) -> description text
         advice_lines = []
         for line in stdout.strip().split("\n"):
             stripped = line.strip()
-            if stripped.startswith("desc|window"):
-                # "desc|window1: fixing a bug" -> key=1, val="fixing a bug"
-                rest = stripped[len("desc|window"):]
+            if stripped.lower().startswith("desc|"):
+                # "desc|project-name: ..." -> label="project-name", val="..."
+                rest = stripped[len("desc|"):]
                 sep = rest.find(":")
                 if sep > 0:
-                    try:
-                        idx = int(rest[:sep])
-                        desc_lines[idx] = rest[sep + 1:].strip()
-                    except ValueError:
-                        pass
+                    label_key = rest[:sep].strip().lower()
+                    desc_text = rest[sep + 1:].strip()
+                    if label_key in label_to_idx:
+                        desc_map[label_to_idx[label_key]] = desc_text
             elif stripped and not all(c in "-=_*#" for c in stripped):
                 # Skip empty lines, pure formatting lines (---, ===, etc.),
                 # and echoed status block lines (CLI sometimes echoes the input)
-                if stripped.startswith("[Window ") and ":" in stripped:
-                    continue
+                if stripped.startswith("[") and "]" in stripped:
+                    # Only skip if bracket content matches a known session label
+                    bracket = stripped[1:stripped.index("]")].strip().lower()
+                    if bracket in label_set:
+                        continue
                 if stripped.startswith("- ") and any(
                     stripped.startswith(p)
                     for p in ("- Task:", "- Phase:", "- Waiting:", "- Files involved:")
@@ -132,11 +187,10 @@ class Advisor:
                 advice_lines.append(line)
 
         # Backfill AI descriptions to sessions
-        target = sessions if sessions else self._pending_sessions
-        if desc_lines and target:
-            for i, s in enumerate(target, 1):
-                if i in desc_lines:
-                    s.ai_task_description = desc_lines[i]
+        if desc_map and target:
+            for i, s in enumerate(target):
+                if i in desc_map:
+                    s.ai_task_description = desc_map[i]
 
         return "\n".join(advice_lines).strip() or None
 
@@ -151,9 +205,10 @@ class Advisor:
             self._pending_proc = None
 
     def _build_status(self, sessions):
-        """Build current status text, each session with a numbered label."""
+        """Build current status text, each session with a project-based label."""
+        labels = self._build_session_labels(sessions)
         blocks = []
-        for i, s in enumerate(sessions, 1):
+        for label, s in zip(labels, sessions):
             wait_min = int(s.wait_seconds / 60) if s.wait_seconds else 0
             # Phase determination
             if s.is_completed:
@@ -163,13 +218,11 @@ class Advisor:
             else:
                 phase = "Running"
 
-            cli_name = "Claude Code" if s.cli_type == "claude" else "Codex"
-            ws = os.path.basename(s.workspace) if s.workspace else "unknown"
             task = s.task_summary or "unknown task"
             files = ", ".join(os.path.basename(f) for f in s.files_involved[-5:]) if s.files_involved else "none"
 
             block = (
-                f"[Window {i}: {ws} \u00b7 {cli_name}]\n"
+                f"[{label}]\n"
                 f"- Task: {task}\n"
                 f"- Phase: {phase}\n"
                 f"- Waiting: {wait_min} min\n"
@@ -219,12 +272,17 @@ class Advisor:
             "  Task description is already shown in the monitor area, no need to repeat in advice\n"
             "- Advice area: your output goes here, focus only on caring suggestions\n\n"
             "## Output format (follow strictly)\n"
-            "1. First output one task description line per window (for monitor area backfill), "
-            "format: \"desc|windowN: bare action description\"\n"
+            "1. First output one task description line per project (for monitor area backfill), "
+            "format: \"desc|<project label>: bare action description\"\n"
+            "   The project label must exactly match the label in brackets from the status block "
+            "(e.g. if status says [vibe-brew], use \"desc|vibe-brew: ...\"; "
+            "if status says [my-app (Claude Code)], use \"desc|my-app (Claude Code): ...\")\n"
             "   Bare action description: 10 words or less, from AI's perspective "
             "(\u00d7\"handling user's bug\" \u2192 \u25cb\"debugging login issue\")\n"
             "2. Then output 1-3 caring suggestions, format: \"\u00b7 suggestion\"\n"
-            "   Advice area should not include project name or task description, only caring and action suggestions\n\n"
+            "   Advice area should not include project name or task description, only caring and action suggestions\n"
+            "   IMPORTANT: Always refer to projects by their project name (e.g. \"vibe-brew\"), "
+            "NEVER use \"window 1\" or \"window N\" phrasing\n\n"
             + examples
             + "## Suggestion rules\n"
             "- Task description is in the monitor area, advice area only needs caring suggestions "
@@ -242,7 +300,11 @@ class Advisor:
             ">10min can do light self-contained tasks\n"
         )
         if n_sessions > 1:
-            prompt = common_rules + "The user is waiting on multiple AI coding tools simultaneously.\n"
+            prompt = common_rules + (
+                "The user is waiting on multiple AI coding tools simultaneously. "
+                "Each project is identified by its label in brackets (e.g. [vibe-brew], [my-app (Codex)]). "
+                "Always refer to them by project name, never by number.\n"
+            )
         else:
             prompt = common_rules + "The user is waiting for an AI coding tool to finish.\n"
         if waitdex:
@@ -253,12 +315,12 @@ class Advisor:
     def _rule_engine(self, sessions):
         """Pure rule engine fallback. Task description is in monitor area,
         advice area only outputs caring suggestions."""
+        labels = self._build_session_labels(sessions)
         lines = []
         has_active = False
         status_index = 0  # increments per status line for template diversity
 
-        for s in sessions:
-            ws = os.path.basename(s.workspace) if s.workspace else ""
+        for s, ws in zip(sessions, labels):
             recent_file = os.path.basename(s.files_involved[-1]) if s.files_involved else ""
             wait_min = int(s.wait_seconds / 60) if s.wait_seconds else 0
 
